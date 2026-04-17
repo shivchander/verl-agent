@@ -39,6 +39,12 @@ from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs, ulysses_pad
 from verl.workers.actor import BasePPOActor
 
+try:
+    from verl071.opear.loss import compute_opear_loss
+    OPEAR_AVAILABLE = True
+except ImportError:
+    OPEAR_AVAILABLE = False
+
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 elif is_npu_available:
@@ -317,6 +323,7 @@ class DataParallelPPOActor(BasePPOActor):
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
+        data_orig = data  # preserve reference for O-PEaR meta_info access
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
@@ -443,5 +450,83 @@ class DataParallelPPOActor(BasePPOActor):
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
+
+        # O-PEaR regularizer: additional forward passes on contrastive data
+        if OPEAR_AVAILABLE:
+            opear_data = data_orig.meta_info.get("opear_data") if hasattr(data_orig, 'meta_info') else None
+            if opear_data is not None:
+                opear_alpha = data_orig.meta_info.get("opear_alpha", 0.5)
+                opear_lambda = data_orig.meta_info.get("opear_lambda", 0.5)
+
+                device = get_torch_device().current_device()
+
+                c_input_ids = opear_data["compliant_input_ids"].to(device)
+                c_attn_mask = opear_data["compliant_attention_mask"].to(device)
+                c_resp_mask = opear_data["compliant_response_mask"].to(device)
+                v_input_ids = opear_data["violating_input_ids"].to(device)
+                v_attn_mask = opear_data["violating_attention_mask"].to(device)
+                v_resp_mask = opear_data["violating_response_mask"].to(device)
+
+                # Compute position_ids from attention_mask
+                from verl.utils.model import compute_position_id_with_mask
+                c_position_ids = compute_position_id_with_mask(c_attn_mask)
+                v_position_ids = compute_position_id_with_mask(v_attn_mask)
+
+                # Derive response_length from response_mask to construct the
+                # ``responses`` tensor that _forward_micro_batch expects.
+                c_resp_len = c_resp_mask.shape[-1]
+                v_resp_len = v_resp_mask.shape[-1]
+                c_responses = c_input_ids[:, -c_resp_len:]
+                v_responses = v_input_ids[:, -v_resp_len:]
+
+                self.actor_optimizer.zero_grad()
+
+                # Forward pass for compliant responses
+                c_micro = {
+                    "input_ids": c_input_ids,
+                    "attention_mask": c_attn_mask,
+                    "position_ids": c_position_ids,
+                    "responses": c_responses,
+                }
+                _, c_log_probs = self._forward_micro_batch(
+                    micro_batch=c_micro, temperature=temperature, calculate_entropy=False
+                )
+
+                # Forward pass for violating responses
+                v_micro = {
+                    "input_ids": v_input_ids,
+                    "attention_mask": v_attn_mask,
+                    "position_ids": v_position_ids,
+                    "responses": v_responses,
+                }
+                _, v_log_probs = self._forward_micro_batch(
+                    micro_batch=v_micro, temperature=temperature, calculate_entropy=False
+                )
+
+                # The log_probs from _forward_micro_batch have shape (batch, response_len)
+                # We need to align with the response masks
+                # Trim or pad to match
+                c_lp = c_log_probs[:, :c_resp_len]
+                v_lp = v_log_probs[:, :v_resp_len]
+                c_rm = c_resp_mask[:, :c_lp.shape[-1]]
+                v_rm = v_resp_mask[:, :v_lp.shape[-1]]
+
+                opear_loss, opear_metrics = compute_opear_loss(
+                    compliant_log_probs=c_lp,
+                    compliant_mask=c_rm,
+                    violating_log_probs=v_lp,
+                    violating_mask=v_rm,
+                    alpha=opear_alpha,
+                )
+
+                scaled_loss = opear_lambda * opear_loss
+                scaled_loss.backward()
+
+                opear_metrics["opear/scaled_loss"] = scaled_loss.detach().item()
+                append_to_dict(metrics, opear_metrics)
+
+                grad_norm = self._optimizer_step()
+                append_to_dict(metrics, {"opear/grad_norm": grad_norm.detach().item()})
+
         self.actor_optimizer.zero_grad()
         return metrics
