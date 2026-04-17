@@ -111,10 +111,7 @@ cmd = [
 ]
 
 env = os.environ.copy()
-# Add repo root for agent_system/verl071 imports, but ensure the installed
-# verl package is used (not the local verl/ fork) by prepending site-packages.
-venv_site = os.path.join(os.getcwd(), ".venv", "lib64", "python3.11", "site-packages")
-env["PYTHONPATH"] = venv_site + ":" + os.getcwd() + ":" + env.get("PYTHONPATH", "")
+env["PYTHONPATH"] = os.getcwd() + ":" + env.get("PYTHONPATH", "")
 env["TOKENIZERS_PARALLELISM"] = "true"
 env["NCCL_DEBUG"] = "WARN"
 env["VLLM_LOGGING_LEVEL"] = "WARN"

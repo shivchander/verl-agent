@@ -9,7 +9,7 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-GROUP_SIZE = 4
+GROUP_SIZE = 2
 TRAIN_DATA_SIZE = 4
 VAL_DATA_SIZE = 4
 
@@ -45,7 +45,7 @@ cmd = [
     f"data.train_batch_size={TRAIN_DATA_SIZE}",
     f"data.val_batch_size={VAL_DATA_SIZE}",
     "data.max_prompt_length=1024",
-    "data.max_response_length=2048",
+    "data.max_response_length=1024",
     "data.filter_overlong_prompts=True",
     "data.truncation=error",
     "data.return_raw_chat=True",
@@ -60,15 +60,15 @@ cmd = [
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
     "actor_rollout_ref.actor.use_kl_loss=False",
     "actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum-norm",
-    "actor_rollout_ref.actor.loss_scale_factor=2048",
+    "actor_rollout_ref.actor.loss_scale_factor=1024",
     "actor_rollout_ref.actor.entropy_coeff=0",
-    "actor_rollout_ref.actor.fsdp_config.param_offload=False",
-    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+    "actor_rollout_ref.actor.fsdp_config.param_offload=True",
+    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
     # Rollout — TP=1, 1 GPU
     "actor_rollout_ref.rollout.name=vllm",
     "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.4",
-    "actor_rollout_ref.rollout.max_model_len=4096",
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.3",
+    "actor_rollout_ref.rollout.max_model_len=2048",
     "actor_rollout_ref.rollout.load_format=safetensors",
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2",
     "actor_rollout_ref.rollout.enable_chunked_prefill=False",
@@ -103,11 +103,7 @@ cmd = [
 ]
 
 env = os.environ.copy()
-# Add repo root for agent_system/verl071 imports, but ensure the installed
-# verl package is used (not the local verl/ fork) by setting PYTHONPATH
-# so that the venv's site-packages comes first.
-venv_site = os.path.join(os.getcwd(), ".venv", "lib64", "python3.11", "site-packages")
-env["PYTHONPATH"] = venv_site + ":" + os.getcwd() + ":" + env.get("PYTHONPATH", "")
+env["PYTHONPATH"] = os.getcwd() + ":" + env.get("PYTHONPATH", "")
 env["TOKENIZERS_PARALLELISM"] = "true"
 env["NCCL_DEBUG"] = "WARN"
 env["VLLM_LOGGING_LEVEL"] = "WARN"
