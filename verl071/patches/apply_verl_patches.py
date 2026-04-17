@@ -86,6 +86,36 @@ def main():
     )
     success = success and ok
 
+    dp_actor_path = os.path.join(
+        verl_path, "workers", "actor", "dp_actor.py"
+    )
+
+    print("Patch 3a: Add O-PEaR import to dp_actor.py")
+    ok = patch_file(
+        dp_actor_path,
+        'from verl.utils.torch_functional import logprobs_from_logits',
+        'from verl.utils.torch_functional import logprobs_from_logits\n'
+        '\n'
+        'try:\n'
+        '    from verl071.opear.actor_hook import opear_accumulate_gradients\n'
+        'except ImportError:\n'
+        '    opear_accumulate_gradients = None',
+        "dp_actor.py: add O-PEaR import",
+    )
+    success = success and ok
+
+    print("Patch 3b: Call O-PEaR gradient accumulation before optimizer step")
+    ok = patch_file(
+        dp_actor_path,
+        '                grad_norm = self._optimizer_step()',
+        '                # O-PEaR: accumulate contrastive loss gradients with GRPO gradients\n'
+        '                if opear_accumulate_gradients is not None:\n'
+        '                    opear_accumulate_gradients(self, data, metrics)\n'
+        '                grad_norm = self._optimizer_step()',
+        "dp_actor.py: call O-PEaR before optimizer step",
+    )
+    success = success and ok
+
     print()
     if success:
         print("All patches applied successfully.")
