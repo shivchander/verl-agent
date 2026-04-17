@@ -53,7 +53,7 @@ def main():
         return f"++{k}={v}"
 
     cmd = [
-        sys.executable, "-m", "verl.trainer.main_ppo",
+        sys.executable, "-m", "verl071.main_opear",
         # Algorithm
         ov("algorithm.adv_estimator", "grpo"),
         ov("algorithm.use_kl_in_reward", False),
@@ -115,7 +115,7 @@ def main():
         ov("reward.custom_reward_function.name", "compute_score"),
         # Trainer
         ov("trainer.critic_warmup", 0),
-        ov("trainer.n_gpus_per_node", 4),
+        ov("trainer.n_gpus_per_node", len(gpus.split(","))),
         ov("trainer.nnodes", 1),
         ov("trainer.total_epochs", t["total_epochs"]),
         ov("trainer.save_freq", t["save_freq"]),
@@ -128,8 +128,9 @@ def main():
 
     project_root = os.getcwd()
     env = os.environ.copy()
-    # Only add project root for agent_system and verl071 imports,
-    # NOT for verl itself (use the installed venv version to avoid vllm mismatch)
+    # Add repo root so agent_system and verl071 packages are importable.
+    # The installed verl from the venv is used for the core framework.
+    # O-PEaR hooks monkey-patch verl at startup (see verl071/opear_hooks.py).
     env["PYTHONPATH"] = project_root + ":" + env.get("PYTHONPATH", "")
     env["TOKENIZERS_PARALLELISM"] = "true"
     env["NCCL_DEBUG"] = "WARN"

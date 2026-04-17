@@ -35,7 +35,7 @@ INTERACTION_CONFIG = os.path.join(os.getcwd(), "alfworld_interaction_config.yaml
 REWARD_FN = os.path.join(os.getcwd(), "alfworld_reward.py")
 
 cmd = [
-    sys.executable, "-m", "verl.trainer.main_ppo",
+    sys.executable, "-m", "verl071.main_opear",
     # Algorithm — Dr. GRPO (no ref model, token-level normalization)
     "algorithm.adv_estimator=grpo",
     "algorithm.use_kl_in_reward=False",
@@ -74,7 +74,7 @@ cmd = [
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
     # Rollout (vLLM) — TP=2 for memory headroom
     "actor_rollout_ref.rollout.name=vllm",
-    "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.5",
     "actor_rollout_ref.rollout.max_model_len=18432",
     "actor_rollout_ref.rollout.load_format=safetensors",
@@ -104,8 +104,8 @@ cmd = [
     "trainer.total_epochs=250",
     "trainer.save_freq=50",
     "trainer.test_freq=5",
-    "trainer.val_before_train=True",
-    'trainer.logger=["console"]',
+    "trainer.val_before_train=False",
+    'trainer.logger=["console","wandb"]',
     "trainer.project_name=verl_agent_alfworld",
     "trainer.experiment_name=drgrpo_opear_qwen3_4b",
 ]
