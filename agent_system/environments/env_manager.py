@@ -161,6 +161,14 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         for i, info in enumerate(infos):
             info['is_action_valid'] = to_numpy(valids[i])
 
+        # Serialize PDDL facts for O-PEaR
+        for info in infos:
+            raw_facts = info.get('facts', [])
+            if raw_facts:
+                info['facts_str'] = "; ".join(str(f) for f in raw_facts)
+            else:
+                info['facts_str'] = ""
+
         next_observations = {'text': full_text_obs, 'image': image_obs, 'anchor': text_obs}
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)

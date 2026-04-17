@@ -251,7 +251,7 @@ class AlfredTWEnv(object):
         wrappers = [alfred_demangler, AlfredInfos]
 
         # Register a new Gym environment.
-        request_infos = textworld.EnvInfos(won=True, admissible_commands=True, extras=["gamefile"])
+        request_infos = textworld.EnvInfos(won=True, admissible_commands=True, facts=True, extras=["gamefile"])
         expert_type = self.config["env"]["expert_type"]
         training_method = self.config["general"]["training_method"]
 

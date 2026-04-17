@@ -386,7 +386,13 @@ class TrajectoryCollector:
             assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
             batch.non_tensor_batch['active_masks'] = torch_to_numpy(active_masks, is_object=True)
-            
+
+            # Store per-turn facts for O-PEaR
+            if 'facts_str' in infos[0]:
+                batch.non_tensor_batch['facts_str'] = np.array(
+                    [info.get('facts_str', '') for info in infos], dtype=object
+                )
+
             # Update episode lengths for active environments
             batch_list: list[dict] = to_list_of_dict(batch)
 
