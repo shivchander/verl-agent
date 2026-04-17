@@ -114,9 +114,15 @@ class TestSelectRollouts:
     @pytest.fixture
     def guide(self):
         # Use a dummy key -- select_rollouts does not call the API
+        orig_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
         g = OPEaRGuide(model="gpt-5.4-nano", beta=0.5)
-        return g
+        yield g
+        # Restore original key
+        if orig_key is not None:
+            os.environ["OPENAI_API_KEY"] = orig_key
+        else:
+            os.environ.pop("OPENAI_API_KEY", None)
 
     def test_basic_selection(self, guide):
         uids = list(range(10))

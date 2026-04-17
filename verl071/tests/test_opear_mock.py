@@ -1,9 +1,14 @@
-"""Mock end-to-end O-PEaR test with real ALFWorld + real GPT-5.4-nano API."""
+"""Mock end-to-end O-PEaR test with real ALFWorld + real GPT-5.4-nano API.
+
+Run standalone: PYTHONPATH=. python verl071/tests/test_opear_mock.py
+(pytest will skip this test if OPENAI_API_KEY is not set to a real key)
+"""
 import asyncio
 import os
 import random
 import sys
 
+import pytest
 import torch
 import yaml
 from dotenv import load_dotenv
@@ -11,6 +16,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+
+_api_key = os.environ.get("OPENAI_API_KEY", "")
+_has_real_key = _api_key.startswith("sk-proj-") or _api_key.startswith("sk-live-")
 
 
 def run_alfworld_episode(max_steps=3):
@@ -79,6 +87,7 @@ def run_alfworld_episode(max_steps=3):
     return task_description, turns, facts_str
 
 
+@pytest.mark.skipif(not _has_real_key, reason="OPENAI_API_KEY not set to a real key")
 def test_mock_e2e():
     print("=" * 60)
     print("O-PEaR Mock End-to-End Test")
