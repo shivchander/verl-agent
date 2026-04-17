@@ -1,12 +1,11 @@
-"""O-PEaR extensions for verl's trainer and actor.
+"""O-PEaR extensions for verl's RayPPOTrainer.
 
-Extends verl's classes via method wrapping — no installed files are modified.
-Call `apply()` before importing verl.trainer.main_ppo so the extensions
-take effect when Ray forks workers.
+Extends the trainer via method wrapping to inject contrastive data generation
+into the training loop. The actor-side O-PEaR loss is handled by a static
+verl patch (see patches/apply_verl_patches.py), not by runtime patching.
 
-Architecture:
-    - Trainer extension: injects contrastive data generation into _update_actor
-    - Actor extension: adds O-PEaR loss after the standard policy update
+Call apply() inside the Ray worker process (e.g. in OPEaRTaskRunner.run())
+before RayPPOTrainer is instantiated.
 """
 import logging
 
@@ -16,10 +15,9 @@ _APPLIED = False
 
 
 def apply():
-    """Apply O-PEaR extensions to verl's RayPPOTrainer and DataParallelPPOActor.
+    """Patch RayPPOTrainer to enable O-PEaR contrastive data generation.
 
-    Safe to call multiple times (no-op after the first call).
-    Must be called BEFORE verl.trainer.main_ppo is imported.
+    Safe to call multiple times (no-op after first).
     """
     global _APPLIED
     if _APPLIED:
@@ -27,13 +25,8 @@ def apply():
     _APPLIED = True
 
     _extend_trainer()
-    _extend_actor()
-    logger.info("O-PEaR extensions applied")
+    logger.info("O-PEaR trainer extensions applied")
 
-
-# ---------------------------------------------------------------------------
-# Trainer: inject contrastive data generation before actor update
-# ---------------------------------------------------------------------------
 
 def _extend_trainer():
     from verl.trainer.ppo.ray_trainer import RayPPOTrainer
@@ -58,7 +51,12 @@ def _extend_trainer():
 
     def _update_actor(self, batch):
         if getattr(self, "opear_enabled", False):
-            _generate_contrastive_data(self, batch)
+            try:
+                _generate_contrastive_data(self, batch)
+            except Exception as e:
+                print(f"[O-PEaR] contrastive generation failed: {e}")
+                import traceback
+                traceback.print_exc()
         return _orig_update_actor(self, batch)
 
     RayPPOTrainer.__init__ = __init__
@@ -71,14 +69,17 @@ def _generate_contrastive_data(trainer, batch):
 
     trajectories = reconstruct_trajectories(batch, trainer.tokenizer)
     if not trajectories:
+        print("[O-PEaR] no trajectories reconstructed, skipping")
         return
 
+    traj_uids = [t["traj_uid"] for t in trajectories]
     selected_uids = trainer.opear_guide.select_rollouts(
-        batch.non_tensor_batch.get("traj_uid", []),
+        traj_uids,
         trainer.config.actor_rollout_ref.rollout.n,
     )
     selected = [t for t in trajectories if t["traj_uid"] in set(selected_uids)]
     if not selected:
+        print("[O-PEaR] no trajectories selected, skipping")
         return
 
     pairs = trainer.opear_guide.generate_contrastive_batch(selected)
@@ -94,78 +95,3 @@ def _generate_contrastive_data(trainer, batch):
         print(f"[O-PEaR] {n}/{len(selected)} valid contrastive pairs")
     else:
         print("[O-PEaR] no valid contrastive pairs")
-
-
-# ---------------------------------------------------------------------------
-# Actor: add O-PEaR loss after standard policy update
-# ---------------------------------------------------------------------------
-
-def _extend_actor():
-    from verl.workers.actor.dp_actor import DataParallelPPOActor
-
-    _orig_update_policy = DataParallelPPOActor.update_policy
-
-    def update_policy(self, data):
-        opear_data = data.meta_info.get("opear_data") if hasattr(data, "meta_info") else None
-        metrics = _orig_update_policy(self, data)
-        if opear_data is not None:
-            opear_metrics = _opear_step(self, data, opear_data)
-            from verl.utils.py_functional import append_to_dict
-            append_to_dict(metrics, opear_metrics)
-        return metrics
-
-    DataParallelPPOActor.update_policy = update_policy
-
-
-def _opear_step(actor, data, opear_data):
-    """Additional optimizer step for O-PEaR regularizer."""
-    import torch
-    from verl071.opear.loss import compute_opear_loss
-    from verl.utils.model import compute_position_id_with_mask
-
-    alpha = data.meta_info.get("opear_alpha", 0.5)
-    lam = data.meta_info.get("opear_lambda", 0.5)
-    temperature = data.meta_info.get("temperature", 1.0)
-    device = next(actor.actor_module.parameters()).device
-
-    c_ids = opear_data["compliant_input_ids"].to(device)
-    c_attn = opear_data["compliant_attention_mask"].to(device)
-    c_mask = opear_data["compliant_response_mask"].to(device)
-    v_ids = opear_data["violating_input_ids"].to(device)
-    v_attn = opear_data["violating_attention_mask"].to(device)
-    v_mask = opear_data["violating_response_mask"].to(device)
-
-    resp_len = c_mask.shape[-1]
-
-    actor.actor_optimizer.zero_grad()
-
-    _, c_lp = actor._forward_micro_batch(
-        micro_batch={"input_ids": c_ids, "attention_mask": c_attn,
-                     "position_ids": compute_position_id_with_mask(c_attn),
-                     "responses": c_ids[:, -resp_len:]},
-        temperature=temperature, calculate_entropy=False)
-
-    _, v_lp = actor._forward_micro_batch(
-        micro_batch={"input_ids": v_ids, "attention_mask": v_attn,
-                     "position_ids": compute_position_id_with_mask(v_attn),
-                     "responses": v_ids[:, -resp_len:]},
-        temperature=temperature, calculate_entropy=False)
-
-    # Align sizes
-    c_lp = c_lp[:, :resp_len]
-    v_lp = v_lp[:, :resp_len]
-    c_rm = c_mask[:, :c_lp.shape[-1]]
-    v_rm = v_mask[:, :v_lp.shape[-1]]
-
-    loss, metrics = compute_opear_loss(c_lp, c_rm, v_lp, v_rm, alpha=alpha)
-    scaled = lam * loss
-    scaled.backward()
-
-    metrics["opear/scaled_loss"] = scaled.detach().item()
-    metrics["opear/lambda"] = lam
-    metrics["opear/alpha"] = alpha
-
-    grad_norm = actor._optimizer_step()
-    metrics["opear/grad_norm"] = grad_norm.detach().item()
-
-    return metrics
