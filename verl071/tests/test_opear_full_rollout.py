@@ -103,8 +103,19 @@ def run_alfworld_episode_with_model(model, tokenizer, device, max_steps=3):
 
     for step in range(max_steps):
         admissible = info.get("admissible_commands", [[]])[0]
-        facts = info.get("facts", [])
-        facts_str = "; ".join(str(f) for f in facts)
+        raw_facts = info.get("facts", [])
+        # Unwrap batched facts (batch_size=1)
+        if raw_facts and isinstance(raw_facts[0], list):
+            raw_facts = raw_facts[0]
+        # Filter to useful instance-level facts only
+        _USEFUL = {'inreceptacle', 'holds',
+                    'isclean', 'ishot', 'iscool', 'issliced',
+                    'opened'}
+        useful = [f for f in raw_facts if hasattr(f, 'name') and f.name in _USEFUL]
+        facts_str = "; ".join(
+            f"{f.name}({', '.join(v.name.strip() for v in f.arguments)})"
+            for f in useful
+        )
         all_facts.append(facts_str)
         admissible_str = format_admissible(admissible)
 
@@ -413,6 +424,50 @@ def main():
         print(f"    Loss is positive => regularizer will push model toward compliant behavior.")
 
     log_section("FULL ROLLOUT TEST COMPLETE")
+
+    # Save full results to JSON for inspection
+    output_path = os.path.join(os.path.dirname(__file__), "full_rollout_results.json")
+    save_data = {
+        "task": task_description,
+        "model_rollout": [],
+        "compliant_responses": [],
+        "violating_responses": [],
+        "logprobs": {
+            "original": all_logprobs["original"],
+            "compliant": all_logprobs["compliant"],
+            "violating": all_logprobs["violating"],
+        },
+        "response_lengths": {
+            "original": all_resp_lengths["original"],
+            "compliant": all_resp_lengths["compliant"],
+            "violating": all_resp_lengths["violating"],
+        },
+        "opear_metrics": {k: float(v) if isinstance(v, (int, float)) else v for k, v in metrics.items()},
+        "facts": facts_str[:2000],
+    }
+    for io in model_io:
+        save_data["model_rollout"].append({
+            "step": io["step"],
+            "prompt": io["prompt"],
+            "response": io["response"],
+            "admissible": io["admissible"],
+            # NOTE: facts are NOT shown to the student model.
+            # They are captured here only for reference / debugging.
+        })
+    for resp in result["compliant"]:
+        save_data["compliant_responses"].append({
+            "think": resp["think"],
+            "action": resp["action"],
+        })
+    for resp in result["violating"]:
+        save_data["violating_responses"].append({
+            "think": resp["think"],
+            "action": resp["action"],
+        })
+
+    with open(output_path, "w") as f:
+        json.dump(save_data, f, indent=2)
+    print(f"\nFull results saved to: {output_path}")
 
 
 if __name__ == "__main__":

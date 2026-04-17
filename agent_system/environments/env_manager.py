@@ -161,11 +161,20 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         for i, info in enumerate(infos):
             info['is_action_valid'] = to_numpy(valids[i])
 
-        # Serialize PDDL facts for O-PEaR
+        # Serialize PDDL facts for O-PEaR (only directly actionable state)
+        _USEFUL_PREDICATES = {
+            'inreceptacle', 'holds',
+            'isclean', 'ishot', 'iscool', 'issliced',
+            'opened',
+        }
         for info in infos:
             raw_facts = info.get('facts', [])
             if raw_facts:
-                info['facts_str'] = "; ".join(str(f) for f in raw_facts)
+                useful = [f for f in raw_facts if f.name in _USEFUL_PREDICATES]
+                info['facts_str'] = "; ".join(
+                    f"{f.name}({', '.join(v.name.strip() for v in f.arguments)})"
+                    for f in useful
+                )
             else:
                 info['facts_str'] = ""
 
