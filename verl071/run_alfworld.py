@@ -36,13 +36,14 @@ cmd = [
     "algorithm.adv_estimator=grpo",
     "algorithm.use_kl_in_reward=False",
     "algorithm.norm_adv_by_std_in_grpo=False",
+    "algorithm.gamma=0.95",
     # Data
     f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",
     f"data.val_files={os.path.expanduser('~/data/verl-agent/text/test.parquet')}",
     f"data.train_batch_size={TRAIN_DATA_SIZE}",
     f"data.val_batch_size={VAL_DATA_SIZE}",
     "data.max_prompt_length=2048",
-    "data.max_response_length=8192",
+    "data.max_response_length=15360",
     "data.filter_overlong_prompts=True",
     "data.truncation=error",
     "data.return_raw_chat=True",
@@ -57,7 +58,7 @@ cmd = [
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
     "actor_rollout_ref.actor.use_kl_loss=False",
     "actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum-norm",
-    "actor_rollout_ref.actor.loss_scale_factor=8192",
+    "actor_rollout_ref.actor.loss_scale_factor=15360",
     "actor_rollout_ref.actor.entropy_coeff=0",
     "actor_rollout_ref.actor.fsdp_config.param_offload=False",
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
@@ -65,7 +66,7 @@ cmd = [
     "actor_rollout_ref.rollout.name=vllm",
     "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
     "actor_rollout_ref.rollout.gpu_memory_utilization=0.5",
-    "actor_rollout_ref.rollout.max_model_len=12288",
+    "actor_rollout_ref.rollout.max_model_len=18432",
     "actor_rollout_ref.rollout.load_format=safetensors",
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2",
     "actor_rollout_ref.rollout.enable_chunked_prefill=False",
@@ -110,7 +111,7 @@ print(f"Launching verl ALFWorld Dr. GRPO training")
 print(f"  Model: Qwen3-4B | GPUs: {env['CUDA_VISIBLE_DEVICES']} | TP=2")
 print(f"  Dr. GRPO: no ref model, token-level normalization")
 print(f"  Batch: {TRAIN_DATA_SIZE} x {GROUP_SIZE} group = {TRAIN_DATA_SIZE * GROUP_SIZE} rollouts/step")
-print(f"  Epochs: 150 | Response budget: 8192 | Max steps: 50")
+print(f"  Epochs: 250 | Response budget: 15360 | Max steps: 50 | gamma: 0.95")
 
 proc = subprocess.Popen(
     cmd,
