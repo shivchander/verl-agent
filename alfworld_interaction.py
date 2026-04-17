@@ -124,22 +124,18 @@ class AlfWorldInteraction(BaseInteraction):
             logger.info(f"Loaded {len(tw_env.game_files)} games for split={alf_split}")
         return self._game_files[alf_split]
 
-    def _select_game_index(self, split: str, prompt_index: int) -> int:
-        """Select a game index deterministically based on prompt_index.
+    def _select_game_index(self, split: str, prompt_index: int, global_step: int = 0) -> int:
+        """Select a game index deterministically based on prompt_index and global_step.
 
-        Pure function of prompt_index — all rollouts with the same index
-        (same GRPO group) get the same game, regardless of which worker
-        or interaction instance handles them. Each interaction instance is
-        created fresh per rollout in verl 0.7.1, so no mutable state can
-        be used for coordination.
-
-        This means the same 16 games are used each epoch. With 16 prompts
-        spread across 6 task types, the model sees diverse tasks each step.
+        Pure function — all rollouts with the same (index, global_step)
+        get the same game, regardless of which worker handles them.
+        Different global_steps cycle through different games, so the model
+        sees all 3553 training games across epochs.
         """
         game_files = self._load_game_files(split)
         num_games = len(game_files)
-        # Spread indices across game list using a stride
-        game_idx = (prompt_index * 223) % num_games  # 223 is prime, good spread
+        # Combine step and index for full game coverage across training
+        game_idx = (prompt_index + global_step * 16) % num_games
         return game_idx
 
     def _create_single_game_env(self, split: str, game_idx: int):
@@ -223,9 +219,10 @@ class AlfWorldInteraction(BaseInteraction):
         prompt_index = kwargs.get("index", 0)
         if isinstance(prompt_index, str):
             prompt_index = int(prompt_index)
+        global_step = kwargs.get("global_step", 0)
 
         try:
-            game_idx = self._select_game_index(split, prompt_index)
+            game_idx = self._select_game_index(split, prompt_index, global_step)
             game_env = self._create_single_game_env(split, game_idx)
             obs, info = game_env.reset()
             initial_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
