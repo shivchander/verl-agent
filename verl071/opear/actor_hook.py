@@ -39,17 +39,19 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     resp_len = c_mask.shape[-1]
 
-    _, c_lp = actor._forward_micro_batch(
+    c_out = actor._forward_micro_batch(
         micro_batch={"input_ids": c_ids, "attention_mask": c_attn,
                      "position_ids": compute_position_id_with_mask(c_attn),
                      "responses": c_ids[:, -resp_len:]},
         temperature=temperature, calculate_entropy=False)
+    c_lp = c_out["log_probs"]
 
-    _, v_lp = actor._forward_micro_batch(
+    v_out = actor._forward_micro_batch(
         micro_batch={"input_ids": v_ids, "attention_mask": v_attn,
                      "position_ids": compute_position_id_with_mask(v_attn),
                      "responses": v_ids[:, -resp_len:]},
         temperature=temperature, calculate_entropy=False)
+    v_lp = v_out["log_probs"]
 
     c_lp = c_lp[:, :resp_len]
     v_lp = v_lp[:, :resp_len]
