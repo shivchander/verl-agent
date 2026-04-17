@@ -1,14 +1,4 @@
-"""Run ALFWorld Dr. GRPO + O-PEaR training via verl 0.7.1.
-
-Setup:
-  - Dr. GRPO: no reference model, token-level loss normalization
-  - O-PEaR: off-policy environment-aware regularization via GPT-5.4-nano guide
-  - TP=2 for more vLLM memory headroom
-  - System prompts with task description, history, admissible actions
-  - Action extraction from <action>...</action> tags
-  - Reward: 10.0 * won (task completion)
-  - group_size=8, 150 epochs
-"""
+"""Run ALFWorld Dr. GRPO + O-PEaR training — lambda=0.3 ablation on GPUs 0-3."""
 import os
 import subprocess
 import sys
@@ -18,7 +8,7 @@ load_dotenv()
 
 GROUP_SIZE = 8
 TRAIN_DATA_SIZE = 16
-VAL_DATA_SIZE = 134  # matches eval_out_of_distribution split (134 unseen games)
+VAL_DATA_SIZE = 134
 
 # Prepare data
 print("Preparing data...")
@@ -41,9 +31,9 @@ cmd = [
     "algorithm.use_kl_in_reward=False",
     "algorithm.norm_adv_by_std_in_grpo=False",
     "algorithm.gamma=0.95",
-    # O-PEaR: Off-Policy Environment-aware Regularization
+    # O-PEaR: lambda=0.3 ablation
     "+algorithm.opear.enable=True",
-    "+algorithm.opear.lambda_coef=0.5",
+    "+algorithm.opear.lambda_coef=0.3",
     "+algorithm.opear.alpha=0.5",
     "+algorithm.opear.beta=0.5",
     "+algorithm.opear.guide_model=gpt-5.4-nano",
@@ -107,7 +97,7 @@ cmd = [
     "trainer.val_before_train=True",
     'trainer.logger=["console","wandb"]',
     "trainer.project_name=verl_agent_alfworld",
-    "trainer.experiment_name=drgrpo_opear_qwen3_4b",
+    "trainer.experiment_name=drgrpo_opear_lambda03_qwen3_4b",
 ]
 
 env = os.environ.copy()
@@ -115,14 +105,14 @@ env["PYTHONPATH"] = os.getcwd() + ":" + env.get("PYTHONPATH", "")
 env["TOKENIZERS_PARALLELISM"] = "true"
 env["NCCL_DEBUG"] = "WARN"
 env["VLLM_LOGGING_LEVEL"] = "WARN"
-env["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 env["TMPDIR"] = "/mnt/nvme0n1/tmp"
 env["RAY_TMPDIR"] = "/mnt/nvme0n1/tmp"
 
-print(f"Launching verl ALFWorld Dr. GRPO + O-PEaR training")
+print(f"Launching verl ALFWorld Dr. GRPO + O-PEaR training (lambda=0.3)")
 print(f"  Model: Qwen3-4B | GPUs: {env['CUDA_VISIBLE_DEVICES']} | TP=2")
 print(f"  Dr. GRPO: no ref model, token-level normalization")
-print(f"  O-PEaR: lambda=0.5, alpha=0.5, beta=0.5, guide=gpt-5.4-nano")
+print(f"  O-PEaR: lambda=0.3, alpha=0.5, beta=0.5, guide=gpt-5.4-nano")
 print(f"  Batch: {TRAIN_DATA_SIZE} x {GROUP_SIZE} group = {TRAIN_DATA_SIZE * GROUP_SIZE} rollouts/step")
 print(f"  Epochs: 250 | Response budget: 15360 | Max steps: 50 | gamma: 0.95")
 

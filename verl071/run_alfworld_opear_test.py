@@ -1,14 +1,4 @@
-"""Run ALFWorld Dr. GRPO + O-PEaR training via verl 0.7.1.
-
-Setup:
-  - Dr. GRPO: no reference model, token-level loss normalization
-  - O-PEaR: off-policy environment-aware regularization via GPT-5.4-nano guide
-  - TP=2 for more vLLM memory headroom
-  - System prompts with task description, history, admissible actions
-  - Action extraction from <action>...</action> tags
-  - Reward: 10.0 * won (task completion)
-  - group_size=8, 150 epochs
-"""
+"""Quick test: ALFWorld Dr. GRPO + O-PEaR with bs=2, group_size=2 (4 rollouts)."""
 import os
 import subprocess
 import sys
@@ -16,9 +6,9 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-GROUP_SIZE = 8
-TRAIN_DATA_SIZE = 16
-VAL_DATA_SIZE = 134  # matches eval_out_of_distribution split (134 unseen games)
+GROUP_SIZE = 2
+TRAIN_DATA_SIZE = 4
+VAL_DATA_SIZE = 4
 
 # Prepare data
 print("Preparing data...")
@@ -97,17 +87,17 @@ cmd = [
     # Reward — custom function that reads turn_scores from interaction
     f"reward.custom_reward_function.path={REWARD_FN}",
     "reward.custom_reward_function.name=compute_score",
-    # Trainer
+    # Trainer — just 2 epochs for quick test
     "trainer.critic_warmup=0",
     "trainer.n_gpus_per_node=4",
     "trainer.nnodes=1",
-    "trainer.total_epochs=250",
-    "trainer.save_freq=30",
+    "trainer.total_epochs=2",
+    "trainer.save_freq=50",
     "trainer.test_freq=5",
-    "trainer.val_before_train=True",
-    'trainer.logger=["console","wandb"]',
+    "trainer.val_before_train=False",
+    'trainer.logger=["console"]',
     "trainer.project_name=verl_agent_alfworld",
-    "trainer.experiment_name=drgrpo_opear_qwen3_4b",
+    "trainer.experiment_name=drgrpo_opear_test",
 ]
 
 env = os.environ.copy()
@@ -116,15 +106,9 @@ env["TOKENIZERS_PARALLELISM"] = "true"
 env["NCCL_DEBUG"] = "WARN"
 env["VLLM_LOGGING_LEVEL"] = "WARN"
 env["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
-env["TMPDIR"] = "/mnt/nvme0n1/tmp"
-env["RAY_TMPDIR"] = "/mnt/nvme0n1/tmp"
 
-print(f"Launching verl ALFWorld Dr. GRPO + O-PEaR training")
-print(f"  Model: Qwen3-4B | GPUs: {env['CUDA_VISIBLE_DEVICES']} | TP=2")
-print(f"  Dr. GRPO: no ref model, token-level normalization")
-print(f"  O-PEaR: lambda=0.5, alpha=0.5, beta=0.5, guide=gpt-5.4-nano")
-print(f"  Batch: {TRAIN_DATA_SIZE} x {GROUP_SIZE} group = {TRAIN_DATA_SIZE * GROUP_SIZE} rollouts/step")
-print(f"  Epochs: 250 | Response budget: 15360 | Max steps: 50 | gamma: 0.95")
+print(f"Quick test: bs={TRAIN_DATA_SIZE}, group={GROUP_SIZE}, epochs=2")
+print(f"  Total rollouts/step: {TRAIN_DATA_SIZE * GROUP_SIZE}")
 
 proc = subprocess.Popen(
     cmd,
