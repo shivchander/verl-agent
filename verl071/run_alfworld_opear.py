@@ -42,11 +42,11 @@ cmd = [
     "algorithm.norm_adv_by_std_in_grpo=False",
     "algorithm.gamma=0.95",
     # O-PEaR: Off-Policy Environment-aware Regularization
-    "algorithm.opear.enable=True",
-    "algorithm.opear.lambda_coef=0.5",
-    "algorithm.opear.alpha=0.5",
-    "algorithm.opear.beta=0.5",
-    "algorithm.opear.guide_model=gpt-5.4-nano",
+    "+algorithm.opear.enable=True",
+    "+algorithm.opear.lambda_coef=0.5",
+    "+algorithm.opear.alpha=0.5",
+    "+algorithm.opear.beta=0.5",
+    "+algorithm.opear.guide_model=gpt-5.4-nano",
     # Data
     f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",
     f"data.val_files={os.path.expanduser('~/data/verl-agent/text/test.parquet')}",
