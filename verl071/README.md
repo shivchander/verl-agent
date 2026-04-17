@@ -60,6 +60,18 @@ python -c "import alfworld; alfworld.download()"
 The training config expects the ALFWorld config at:
 `agent_system/environments/env_package/alfworld/configs/config_tw.yaml`
 
+### verl Patches
+
+Two small patches to verl's agent loop are required for deterministic game selection
+(correct GRPO grouping). Apply them after installing verl:
+
+```bash
+python verl071/patches/apply_verl_patches.py
+```
+
+This injects `global_step` and `rollout_n` into the interaction kwargs so that all
+rollouts in the same GRPO group play the same ALFWorld game.
+
 ## Running
 
 ```bash
