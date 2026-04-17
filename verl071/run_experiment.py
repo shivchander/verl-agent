@@ -93,7 +93,7 @@ def build_cmd(cfg):
         f"trainer.total_epochs={t['total_epochs']}",
         f"trainer.save_freq={t['save_freq']}",
         f"trainer.test_freq={t['test_freq']}",
-        "trainer.val_before_train=True",
+        f"trainer.val_before_train={t.get('val_before_train', True)}",
         'trainer.logger=["console"]',
         "trainer.project_name=verl_agent_alfworld",
         f"trainer.experiment_name=drgrpo_{cfg['experiment_name']}_qwen3_4b",
