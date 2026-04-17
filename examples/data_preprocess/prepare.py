@@ -90,6 +90,7 @@ if __name__ == '__main__':
                         'index': idx,
                         'interaction_kwargs': {
                             'name': 'alfworld',
+                            'split': split,
                         },
                     }
                 }
