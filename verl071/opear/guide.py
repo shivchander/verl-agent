@@ -17,6 +17,9 @@ from openai import AsyncOpenAI
 
 from verl071.opear.prompts import build_guide_prompt, parse_guide_response
 
+import nest_asyncio
+nest_asyncio.apply()
+
 logger = logging.getLogger(__name__)
 
 
@@ -194,7 +197,13 @@ class OPEaRGuide:
             return await asyncio.gather(*tasks)
 
         t0 = time.time()
-        results = asyncio.run(_run_batch())
+        try:
+            loop = asyncio.get_running_loop()
+            import nest_asyncio
+            nest_asyncio.apply()
+            results = loop.run_until_complete(_run_batch())
+        except RuntimeError:
+            results = asyncio.run(_run_batch())
         elapsed = time.time() - t0
 
         success_count = sum(1 for r in results if r is not None)
