@@ -183,10 +183,13 @@ def parse_guide_response(
     # Find all [TURN N] positions
     markers = list(_TURN_MARKER_RE.finditer(response_text))
 
-    if len(markers) != expected_turns:
-        raise ValueError(
-            f"Expected {expected_turns} turn(s) but found {len(markers)} "
-            f"[TURN N] marker(s) in guide response."
+    if len(markers) == 0:
+        raise ValueError("No [TURN N] markers found in guide response.")
+    if len(markers) < expected_turns:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Expected %d turn(s) but found %d — using partial rewrite",
+            expected_turns, len(markers),
         )
 
     results: list[dict] = []

@@ -18,106 +18,79 @@ logger = logging.getLogger(__name__)
 
 
 def reconstruct_trajectories(batch, tokenizer) -> list[dict]:
-    """Reconstruct per-trajectory data from the flat per-turn training batch.
+    """Reconstruct per-trajectory data from the flat training batch.
 
-    Groups turns by traj_uid and extracts the text content needed for guide
-    prompts.
+    Each row in the batch is one complete multi-turn episode (prompt +
+    concatenated response). Trajectories are identified by the ``index``
+    field in ``non_tensor_batch`` — rows with the same index are different
+    rollouts (group members) of the same prompt.
+
+    We pick one representative row per unique index to build the trajectory
+    dict that the guide model needs.
 
     Args:
-        batch: DataProto-like object with:
-            - batch.batch["prompts"]: (N, prompt_len) tensor
-            - batch.batch["responses"]: (N, response_len) tensor
-            - batch.batch["attention_mask"]: (N, total_len) tensor
-            - batch.non_tensor_batch["traj_uid"]: (N,) array of trajectory IDs
-            - batch.non_tensor_batch["active_masks"]: (N,) boolean array
-            - batch.non_tensor_batch["facts_str"]: (N,) array of fact strings
-              (optional)
-        tokenizer: HuggingFace tokenizer for decoding
+        batch: DataProto with batch["prompts"], batch["responses"],
+            batch["attention_mask"], and non_tensor_batch["index"].
+        tokenizer: HuggingFace tokenizer for decoding.
 
     Returns:
-        List of trajectory dicts:
-            - traj_uid: str
-            - task_description: str (extracted from first observation)
-            - facts: str (semicolon-separated PDDL facts from first active turn)
-            - turns: list of {"role": "observation"|"assistant", "content": "..."}
-              dicts
-            - turn_indices: list of batch indices for this trajectory's active
-              turns
+        List of trajectory dicts with keys: traj_uid, task_description,
+        facts, turns, turn_indices.
     """
-    traj_uids = batch.non_tensor_batch.get("traj_uid", np.array([]))
-    if len(traj_uids) == 0:
+    uids = batch.non_tensor_batch.get("uid", None)
+    if uids is None:
+        logger.warning("No 'uid' field in batch.non_tensor_batch")
         return []
 
-    # Group batch indices by trajectory
-    uid_to_indices: dict[str, list[int]] = {}
-    for i, uid in enumerate(traj_uids):
-        uid_to_indices.setdefault(str(uid), []).append(i)
+    # Group batch positions by uid — pick first occurrence as
+    # representative for each unique prompt.
+    seen: dict[str, int] = {}
+    for i, uid in enumerate(uids):
+        uid_str = str(uid)
+        if uid_str not in seen:
+            seen[uid_str] = i
 
     trajectories: list[dict] = []
-    for uid, indices in uid_to_indices.items():
-        # Only include active turns
-        active_indices: list[int] = []
-        for idx in indices:
-            active = batch.non_tensor_batch.get(
-                "active_masks", np.ones(len(traj_uids))
-            )[idx]
-            if active:
-                active_indices.append(idx)
+    for uid_str, batch_pos in seen.items():
+        prompt_ids = batch.batch["prompts"][batch_pos]
+        attn = batch.batch["attention_mask"][batch_pos]
+        prompt_len = prompt_ids.shape[0]
+        valid_len = int(attn[:prompt_len].sum().item())
+        valid_ids = prompt_ids[-valid_len:]
+        observation = tokenizer.decode(valid_ids, skip_special_tokens=True)
 
-        if not active_indices:
-            continue
+        response_ids = batch.batch["responses"][batch_pos]
+        resp_len = int(attn[prompt_len:].sum().item())
+        valid_resp = response_ids[:resp_len]
+        response = tokenizer.decode(valid_resp, skip_special_tokens=True)
 
-        turns: list[dict] = []
+        facts = ""
+        if "facts_str" in batch.non_tensor_batch:
+            facts = str(batch.non_tensor_batch["facts_str"][batch_pos])
+
         task_description = ""
-        first_facts = ""
+        marker = "Your task is to: "
+        pos = observation.find(marker)
+        if pos != -1:
+            end = observation.find("\n", pos)
+            task_description = observation[
+                pos + len(marker) : end if end != -1 else None
+            ].strip()
 
-        for turn_num, idx in enumerate(active_indices):
-            # Decode observation (prompt)
-            prompt_ids = batch.batch["prompts"][idx]
-            attn = batch.batch["attention_mask"][idx]
-            prompt_len = prompt_ids.shape[0]
-            valid_len = attn[:prompt_len].sum().item()
-            valid_ids = prompt_ids[-int(valid_len):]
-            observation = tokenizer.decode(valid_ids, skip_special_tokens=True)
+        turns = [
+            {"role": "observation", "content": observation},
+            {"role": "assistant", "content": response},
+        ]
 
-            # Decode student response
-            response_ids = batch.batch["responses"][idx]
-            resp_len = attn[prompt_len:].sum().item()
-            valid_resp = response_ids[: int(resp_len)]
-            response = tokenizer.decode(valid_resp, skip_special_tokens=True)
+        all_positions = [i for i, u in enumerate(uids) if str(u) == uid_str]
 
-            # Get facts (stored during rollout)
-            facts = ""
-            if "facts_str" in batch.non_tensor_batch:
-                facts = str(batch.non_tensor_batch["facts_str"][idx])
-
-            # Capture facts from first active turn
-            if turn_num == 0 and facts:
-                first_facts = facts
-
-            # Build alternating observation/assistant turns
-            turns.append({"role": "observation", "content": observation})
-            turns.append({"role": "assistant", "content": response})
-
-            # Extract task description from first turn's observation
-            if not task_description:
-                marker = "Your task is to: "
-                pos = observation.find(marker)
-                if pos != -1:
-                    end = observation.find("\n", pos)
-                    task_description = observation[
-                        pos + len(marker) : end if end != -1 else None
-                    ].strip()
-
-        trajectories.append(
-            {
-                "traj_uid": uid,
-                "task_description": task_description or "Complete the task.",
-                "facts": first_facts,
-                "turns": turns,
-                "turn_indices": active_indices,
-            }
-        )
+        trajectories.append({
+            "traj_uid": uid_str,
+            "task_description": task_description or "Complete the task.",
+            "facts": facts,
+            "turns": turns,
+            "turn_indices": all_positions,
+        })
 
     return trajectories
 
