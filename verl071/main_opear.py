@@ -8,8 +8,6 @@ Usage:
     python -m verl071.main_opear [hydra overrides...]
 """
 # Step 1: Apply O-PEaR extensions BEFORE verl.trainer.main_ppo is loaded.
-# This patches RayPPOTrainer and DataParallelPPOActor in-place so that
-# when main_ppo imports them, it gets the extended versions.
 from verl071.opear.extensions import apply
 apply()
 

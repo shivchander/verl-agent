@@ -1,13 +1,6 @@
-"""Run ALFWorld Dr. GRPO + O-PEaR training via verl 0.7.1.
+"""Quick 1-GPU smoke test for O-PEaR + DrGRPO.
 
-Setup:
-  - Dr. GRPO: no reference model, token-level loss normalization
-  - O-PEaR: off-policy environment-aware regularization via GPT-5.4-nano guide
-  - TP=2 for more vLLM memory headroom
-  - System prompts with task description, history, admissible actions
-  - Action extraction from <action>...</action> tags
-  - Reward: 10.0 * won (task completion)
-  - group_size=8, 150 epochs
+Runs 2 epochs with batch_size=2 to verify the full pipeline connects.
 """
 import os
 import subprocess
@@ -16,11 +9,10 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-GROUP_SIZE = 8
-TRAIN_DATA_SIZE = 16
-VAL_DATA_SIZE = 134  # matches eval_out_of_distribution split (134 unseen games)
+GROUP_SIZE = 4
+TRAIN_DATA_SIZE = 4
+VAL_DATA_SIZE = 4
 
-# Prepare data
 print("Preparing data...")
 subprocess.run(
     [sys.executable, "-m", "examples.data_preprocess.prepare",
@@ -36,24 +28,24 @@ REWARD_FN = os.path.join(os.getcwd(), "alfworld_reward.py")
 
 cmd = [
     sys.executable, "-m", "verl071.main_opear",
-    # Algorithm — Dr. GRPO (no ref model, token-level normalization)
+    # Algorithm
     "algorithm.adv_estimator=grpo",
     "algorithm.use_kl_in_reward=False",
     "algorithm.norm_adv_by_std_in_grpo=False",
     "algorithm.gamma=0.95",
-    # O-PEaR: Off-Policy Environment-aware Regularization
+    # O-PEaR
     "+algorithm.opear.enable=True",
     "+algorithm.opear.lambda_coef=0.5",
     "+algorithm.opear.alpha=0.5",
     "+algorithm.opear.beta=0.5",
     "+algorithm.opear.guide_model=gpt-5.4-nano",
-    # Data
+    # Data (small)
     f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",
     f"data.val_files={os.path.expanduser('~/data/verl-agent/text/test.parquet')}",
     f"data.train_batch_size={TRAIN_DATA_SIZE}",
     f"data.val_batch_size={VAL_DATA_SIZE}",
-    "data.max_prompt_length=2048",
-    "data.max_response_length=15360",
+    "data.max_prompt_length=1024",
+    "data.max_response_length=2048",
     "data.filter_overlong_prompts=True",
     "data.truncation=error",
     "data.return_raw_chat=True",
@@ -62,80 +54,73 @@ cmd = [
     "actor_rollout_ref.model.path=Qwen/Qwen3-4B",
     "actor_rollout_ref.model.use_remove_padding=True",
     "actor_rollout_ref.model.enable_gradient_checkpointing=True",
-    # Actor — Dr. GRPO: no KL loss, no ref model
+    # Actor
     "actor_rollout_ref.actor.optim.lr=1e-6",
     f"actor_rollout_ref.actor.ppo_mini_batch_size={TRAIN_DATA_SIZE}",
     "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
     "actor_rollout_ref.actor.use_kl_loss=False",
     "actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum-norm",
-    "actor_rollout_ref.actor.loss_scale_factor=15360",
+    "actor_rollout_ref.actor.loss_scale_factor=2048",
     "actor_rollout_ref.actor.entropy_coeff=0",
     "actor_rollout_ref.actor.fsdp_config.param_offload=False",
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
-    # Rollout (vLLM) — TP=2 for memory headroom
+    # Rollout — TP=1, 1 GPU
     "actor_rollout_ref.rollout.name=vllm",
-    "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
-    "actor_rollout_ref.rollout.gpu_memory_utilization=0.5",
-    "actor_rollout_ref.rollout.max_model_len=18432",
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.4",
+    "actor_rollout_ref.rollout.max_model_len=4096",
     "actor_rollout_ref.rollout.load_format=safetensors",
     "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2",
     "actor_rollout_ref.rollout.enable_chunked_prefill=False",
-    "actor_rollout_ref.rollout.enforce_eager=False",
-    "actor_rollout_ref.rollout.free_cache_engine=False",
-    # Validation sampling
+    "actor_rollout_ref.rollout.enforce_eager=True",
+    "actor_rollout_ref.rollout.free_cache_engine=True",
+    # Validation
     "actor_rollout_ref.rollout.val_kwargs.temperature=0.4",
     "actor_rollout_ref.rollout.val_kwargs.do_sample=True",
-    # Agent loop — tool_agent with ALFWorld interaction
+    # Agent loop
     "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent",
     f"actor_rollout_ref.rollout.multi_turn.interaction_config_path={INTERACTION_CONFIG}",
-    "actor_rollout_ref.rollout.multi_turn.max_user_turns=50",
-    # Group size for GRPO advantage estimation
+    "actor_rollout_ref.rollout.multi_turn.max_user_turns=5",
+    # Group size
     f"actor_rollout_ref.rollout.n={GROUP_SIZE}",
-    # Ref model — disabled for Dr. GRPO
+    # Ref model (disabled)
     "actor_rollout_ref.ref.fsdp_config.param_offload=True",
     "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2",
-    # Reward — custom function that reads turn_scores from interaction
+    # Reward
     f"reward.custom_reward_function.path={REWARD_FN}",
     "reward.custom_reward_function.name=compute_score",
-    # Trainer
+    # Trainer — 1 GPU, 2 epochs, no val
     "trainer.critic_warmup=0",
-    "trainer.n_gpus_per_node=4",
+    "trainer.n_gpus_per_node=1",
     "trainer.nnodes=1",
-    "trainer.total_epochs=250",
-    "trainer.save_freq=50",
-    "trainer.test_freq=5",
+    "trainer.total_epochs=2",
+    "trainer.save_freq=999",
+    "trainer.test_freq=999",
     "trainer.val_before_train=False",
-    'trainer.logger=["console","wandb"]',
-    "trainer.project_name=verl_agent_alfworld",
-    "trainer.experiment_name=drgrpo_opear_qwen3_4b",
+    'trainer.logger=["console"]',
+    "trainer.project_name=opear_smoke_test",
+    "trainer.experiment_name=smoke_1gpu",
 ]
 
 env = os.environ.copy()
 # Add repo root for agent_system/verl071 imports, but ensure the installed
-# verl package is used (not the local verl/ fork) by prepending site-packages.
+# verl package is used (not the local verl/ fork) by setting PYTHONPATH
+# so that the venv's site-packages comes first.
 venv_site = os.path.join(os.getcwd(), ".venv", "lib64", "python3.11", "site-packages")
 env["PYTHONPATH"] = venv_site + ":" + os.getcwd() + ":" + env.get("PYTHONPATH", "")
 env["TOKENIZERS_PARALLELISM"] = "true"
 env["NCCL_DEBUG"] = "WARN"
 env["VLLM_LOGGING_LEVEL"] = "WARN"
-env["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+env["CUDA_VISIBLE_DEVICES"] = "0"
 
-print(f"Launching verl ALFWorld Dr. GRPO + O-PEaR training")
-print(f"  Model: Qwen3-4B | GPUs: {env['CUDA_VISIBLE_DEVICES']} | TP=2")
-print(f"  Dr. GRPO: no ref model, token-level normalization")
-print(f"  O-PEaR: lambda=0.5, alpha=0.5, beta=0.5, guide=gpt-5.4-nano")
-print(f"  Batch: {TRAIN_DATA_SIZE} x {GROUP_SIZE} group = {TRAIN_DATA_SIZE * GROUP_SIZE} rollouts/step")
-print(f"  Epochs: 250 | Response budget: 15360 | Max steps: 50 | gamma: 0.95")
+print("Launching 1-GPU O-PEaR smoke test")
+print("  batch=2, group=2, epochs=2, max_turns=5, response_budget=2048")
 
 proc = subprocess.Popen(
-    cmd,
-    env=env,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1,
+    cmd, env=env,
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    text=True, bufsize=1,
 )
-
 for line in proc.stdout:
     sys.stdout.write(line)
     sys.stdout.flush()
