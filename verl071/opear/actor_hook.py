@@ -1,0 +1,68 @@
+"""O-PEaR gradient accumulation hook for verl's DataParallelPPOActor.
+
+Called from inside update_policy (via verl patch) between the GRPO backward
+pass and optimizer.step(). Computes O-PEaR contrastive loss and calls
+backward(), accumulating gradients with the existing GRPO gradients.
+"""
+
+import torch
+from verl071.opear.loss import compute_opear_loss
+
+
+def opear_accumulate_gradients(actor, data, metrics):
+    """Compute O-PEaR loss and accumulate gradients (no optimizer step).
+
+    Args:
+        actor: DataParallelPPOActor instance (has _forward_micro_batch, actor_module)
+        data: DataProto with meta_info containing opear_data, opear_alpha, opear_lambda
+        metrics: dict to update with O-PEaR metrics
+    """
+    if not hasattr(data, "meta_info"):
+        return
+    opear_data = data.meta_info.get("opear_data")
+    if opear_data is None:
+        return
+
+    from verl.utils.model import compute_position_id_with_mask
+
+    alpha = data.meta_info.get("opear_alpha", 0.5)
+    lam = data.meta_info.get("opear_lambda", 0.5)
+    temperature = data.meta_info.get("temperature", 1.0)
+    device = next(actor.actor_module.parameters()).device
+
+    c_ids = opear_data["compliant_input_ids"].to(device)
+    c_attn = opear_data["compliant_attention_mask"].to(device)
+    c_mask = opear_data["compliant_response_mask"].to(device)
+    v_ids = opear_data["violating_input_ids"].to(device)
+    v_attn = opear_data["violating_attention_mask"].to(device)
+    v_mask = opear_data["violating_response_mask"].to(device)
+
+    resp_len = c_mask.shape[-1]
+
+    _, c_lp = actor._forward_micro_batch(
+        micro_batch={"input_ids": c_ids, "attention_mask": c_attn,
+                     "position_ids": compute_position_id_with_mask(c_attn),
+                     "responses": c_ids[:, -resp_len:]},
+        temperature=temperature, calculate_entropy=False)
+
+    _, v_lp = actor._forward_micro_batch(
+        micro_batch={"input_ids": v_ids, "attention_mask": v_attn,
+                     "position_ids": compute_position_id_with_mask(v_attn),
+                     "responses": v_ids[:, -resp_len:]},
+        temperature=temperature, calculate_entropy=False)
+
+    c_lp = c_lp[:, :resp_len]
+    v_lp = v_lp[:, :resp_len]
+    c_rm = c_mask[:, :c_lp.shape[-1]]
+    v_rm = v_mask[:, :v_lp.shape[-1]]
+
+    loss, opear_metrics = compute_opear_loss(c_lp, c_rm, v_lp, v_rm, alpha=alpha)
+    scaled = lam * loss
+    scaled.backward()
+
+    opear_metrics["opear/scaled_loss"] = scaled.detach().item()
+    opear_metrics["opear/lambda"] = lam
+    opear_metrics["opear/alpha"] = alpha
+
+    for k, v in opear_metrics.items():
+        metrics[k] = metrics.get(k, 0.0) + v
