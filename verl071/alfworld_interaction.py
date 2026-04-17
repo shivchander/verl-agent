@@ -111,17 +111,18 @@ class AlfWorldInteraction(BaseInteraction):
     def _load_game_files(self, split: str) -> list[str]:
         """Load and cache game file list for a split."""
         alf_split = SPLIT_MAP.get(split, "train")
-        if alf_split not in self._game_files:
-            from alfworld.agents.environment import get_environment
-            import yaml
+        with self._lock:
+            if alf_split not in self._game_files:
+                from alfworld.agents.environment import get_environment
+                import yaml
 
-            with open(self._alf_config_path) as f:
-                alf_config = yaml.safe_load(f)
+                with open(self._alf_config_path) as f:
+                    alf_config = yaml.safe_load(f)
 
-            tw_env = get_environment("AlfredTWEnv")(alf_config, train_eval=alf_split)
-            self._game_files[alf_split] = list(tw_env.game_files)
-            self._alf_configs[alf_split] = alf_config
-            logger.info(f"Loaded {len(tw_env.game_files)} games for split={alf_split}")
+                tw_env = get_environment("AlfredTWEnv")(alf_config, train_eval=alf_split)
+                self._game_files[alf_split] = list(tw_env.game_files)
+                self._alf_configs[alf_split] = alf_config
+                logger.info(f"Loaded {len(tw_env.game_files)} games for split={alf_split}")
         return self._game_files[alf_split]
 
     def _select_game_index(self, split: str, prompt_index: int, global_step: int = 0) -> int:
