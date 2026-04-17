@@ -2,7 +2,9 @@
 
 Wraps ALFWorld text-based environments as a verl BaseInteraction.
 Matches the original verl-agent functionality:
-  - One persistent game_env per split, cycling through games via reset()
+  - Deterministic game selection: rollouts in the same GRPO group play the
+    same game (based on prompt index + epoch counter)
+  - Cycles through all games across epochs
   - Train split: 3553 games, Val split: 134 unseen games (eval_out_of_distribution)
   - Rich prompts with task description, history, admissible actions
   - Action extraction from <action>...</action> tags
@@ -12,9 +14,12 @@ Matches the original verl-agent functionality:
 import logging
 import os
 import re
+import threading
 from typing import Any, Optional
 from uuid import uuid4
 
+import textworld
+import textworld.gym
 from verl.interactions.base import BaseInteraction
 
 logger = logging.getLogger(__name__)
@@ -55,10 +60,7 @@ SPLIT_MAP = {
 
 
 def extract_action(text: str) -> tuple[str, bool]:
-    """Extract action from <action>...</action> tags.
-
-    Returns (action_text, is_valid).
-    """
+    """Extract action from <action>...</action> tags."""
     text_lower = text.lower()
     start_tag = "<action>"
     end_tag = "</action>"
@@ -69,15 +71,10 @@ def extract_action(text: str) -> tuple[str, bool]:
         return text_lower[-30:], False
 
     action = text_lower[start_idx + len(start_tag):end_idx].strip()
-
-    # Check for <think>...</think> tags
     has_think = "<think>" in text_lower and "</think>" in text_lower
-
-    # Check for Chinese characters (invalid)
     has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
 
-    is_valid = has_think and not has_chinese
-    return action, is_valid
+    return action, has_think and not has_chinese
 
 
 def format_admissible(actions: list[str]) -> str:
@@ -88,9 +85,10 @@ def format_admissible(actions: list[str]) -> str:
 class AlfWorldInteraction(BaseInteraction):
     """ALFWorld text game as a verl interaction.
 
-    Creates one persistent game_env per split (train / eval). Each call to
-    start_interaction() calls game_env.reset() which cycles to the next game
-    in the split, matching the original verl-agent behavior.
+    Game selection is deterministic based on (prompt_index, call_count) so
+    that all rollouts in the same GRPO group play the same game. The
+    call_count increments per prompt_index, ensuring different games across
+    epochs.
     """
 
     def __init__(self, config: dict[str, Any]):
@@ -99,42 +97,81 @@ class AlfWorldInteraction(BaseInteraction):
         self.history_length = config.get("history_length", 2)
         self.envs = {}  # instance_id -> episode state
 
-        # ALFWorld setup
         self._alf_config_path = config.get(
             "alf_config_path",
             os.path.join(os.path.dirname(__file__),
                          "agent_system/environments/env_package/alfworld/configs/config_tw.yaml")
         )
-        # Persistent game envs per split — created once, reused via reset()
-        self._game_envs: dict[str, Any] = {}  # split_name -> game_env
-        self._tw_envs: dict[str, Any] = {}    # split_name -> AlfredTWEnv
 
-    def _get_game_env(self, split: str = "train"):
-        """Get or create a persistent game_env for the given split.
+        # Game file lists per split (lazy loaded)
+        self._game_files: dict[str, list[str]] = {}
+        self._alf_configs: dict[str, dict] = {}
+        # Track how many times each prompt_index has been seen (for cycling)
+        self._call_counts: dict[str, dict[int, int]] = {}  # split -> {index -> count}
+        self._lock = threading.Lock()
 
-        The game_env cycles through all games in the split on each reset().
-        """
+    def _load_game_files(self, split: str) -> list[str]:
+        """Load and cache game file list for a split."""
         alf_split = SPLIT_MAP.get(split, "train")
-
-        if alf_split not in self._game_envs:
+        if alf_split not in self._game_files:
             from alfworld.agents.environment import get_environment
             import yaml
 
             with open(self._alf_config_path) as f:
                 alf_config = yaml.safe_load(f)
 
-            AlfredTWEnv = get_environment("AlfredTWEnv")
-            tw_env = AlfredTWEnv(alf_config, train_eval=alf_split)
-            game_env = tw_env.init_env(batch_size=1)
+            tw_env = get_environment("AlfredTWEnv")(alf_config, train_eval=alf_split)
+            self._game_files[alf_split] = list(tw_env.game_files)
+            self._alf_configs[alf_split] = alf_config
+            self._call_counts[alf_split] = {}
+            logger.info(f"Loaded {len(tw_env.game_files)} games for split={alf_split}")
+        return self._game_files[alf_split]
 
-            self._tw_envs[alf_split] = tw_env
-            self._game_envs[alf_split] = game_env
-            logger.info(
-                f"ALFWorld game_env created: split={alf_split}, "
-                f"num_games={tw_env.num_games}"
-            )
+    def _select_game_index(self, split: str, prompt_index: int) -> int:
+        """Select a game index deterministically based on prompt_index.
 
-        return self._game_envs[alf_split]
+        All rollouts with the same prompt_index (same GRPO group) get the
+        same game. Across epochs, the call_count increments so different
+        games are selected.
+        """
+        alf_split = SPLIT_MAP.get(split, "train")
+        game_files = self._load_game_files(split)
+        num_games = len(game_files)
+
+        with self._lock:
+            counts = self._call_counts[alf_split]
+            call_num = counts.get(prompt_index, 0)
+            counts[prompt_index] = call_num + 1
+
+        # Deterministic game selection: spread across game list
+        game_idx = (prompt_index + call_num * 16) % num_games
+        return game_idx
+
+    def _create_single_game_env(self, split: str, game_idx: int):
+        """Create a TextWorld env for a single game file."""
+        alf_split = SPLIT_MAP.get(split, "train")
+        game_files = self._game_files[alf_split]
+        game_file = game_files[game_idx]
+
+        from alfworld.agents.environment.alfred_tw_env import AlfredDemangler, AlfredInfos
+
+        alf_config = self._alf_configs[alf_split]
+        domain_randomization = alf_config["env"]["domain_randomization"] if alf_split == "train" else False
+        alfred_demangler = AlfredDemangler(shuffle=domain_randomization)
+        wrappers = [alfred_demangler, AlfredInfos]
+
+        request_infos = textworld.EnvInfos(
+            won=True, admissible_commands=True, extras=["gamefile"]
+        )
+
+        env_id = textworld.gym.register_games(
+            [game_file], request_infos,
+            batch_size=1, asynchronous=False,
+            max_episode_steps=self.max_steps,
+            wrappers=wrappers,
+        )
+        env = textworld.gym.make(env_id)
+        return env
 
     def _extract_task(self, initial_obs: str) -> str:
         """Extract task description from initial observation."""
@@ -180,25 +217,28 @@ class AlfWorldInteraction(BaseInteraction):
     async def start_interaction(self, instance_id: Optional[str] = None, **kwargs) -> str:
         """Start a new ALFWorld episode.
 
-        Calls reset() on the persistent game_env for this split, which
-        advances to the next game in the cycle.
+        Game selection is deterministic: all rollouts with the same
+        prompt index play the same game (correct GRPO grouping).
         """
         if instance_id is None:
             instance_id = str(uuid4())
 
         split = kwargs.get("split", "train")
+        # The 'index' from extra_info identifies the prompt — same across a GRPO group
+        prompt_index = kwargs.get("index", 0)
+        if isinstance(prompt_index, str):
+            prompt_index = int(prompt_index)
 
         try:
-            game_env = self._get_game_env(split)
+            game_idx = self._select_game_index(split, prompt_index)
+            game_env = self._create_single_game_env(split, game_idx)
             obs, info = game_env.reset()
             initial_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
 
-            # Extract admissible commands
             admissible = info.get("admissible_commands", [])
             if isinstance(admissible, (list, tuple)) and admissible and isinstance(admissible[0], list):
                 admissible = admissible[0]
 
-            # Extract task description from initial observation
             task = self._extract_task(initial_obs)
 
             self.envs[instance_id] = {
@@ -209,8 +249,12 @@ class AlfWorldInteraction(BaseInteraction):
                 "current_obs": initial_obs,
                 "admissible_commands": admissible,
                 "history": [],
+                "game_idx": game_idx,
             }
-            logger.info(f"Started ALFWorld episode {instance_id} ({split}), task: {task[:80]}...")
+            print(
+                f"[ALFWorld] instance={instance_id[:8]} index={prompt_index} "
+                f"game_idx={game_idx} task={task[:50]}..."
+            )
         except Exception as e:
             logger.error(f"Failed to start ALFWorld episode: {e}")
             self.envs[instance_id] = {
@@ -221,6 +265,7 @@ class AlfWorldInteraction(BaseInteraction):
                 "current_obs": f"Error: {e}",
                 "admissible_commands": [],
                 "history": [],
+                "game_idx": -1,
             }
 
         return instance_id
@@ -228,11 +273,7 @@ class AlfWorldInteraction(BaseInteraction):
     async def generate_response(
         self, instance_id: str, messages: list[dict[str, Any]], **kwargs
     ) -> tuple[bool, str, float, dict[str, Any]]:
-        """Process the agent's action and return environment observation.
-
-        Returns:
-            (should_terminate, observation_prompt, reward, extra_info)
-        """
+        """Process the agent's action and return environment observation."""
         env_state = self.envs.get(instance_id)
         if env_state is None or env_state["done"] or env_state["game_env"] is None:
             return True, "Episode ended.", 0.0, {}
@@ -253,10 +294,8 @@ class AlfWorldInteraction(BaseInteraction):
         if not raw_action:
             return True, "No action provided.", 0.0, {}
 
-        # Parse action from <action> tags
         action, is_valid = extract_action(raw_action)
 
-        # Step the environment
         game_env = env_state["game_env"]
         env_state["step_count"] += 1
 
@@ -265,16 +304,13 @@ class AlfWorldInteraction(BaseInteraction):
             obs_text = obs[0] if isinstance(obs, (list, tuple)) else str(obs)
             done = dones[0] if isinstance(dones, (list, tuple)) else bool(dones)
 
-            # Unpack info (ALFWorld wraps values in lists)
             for k in list(info.keys()):
                 if isinstance(info[k], (list, tuple)) and len(info[k]) == 1:
                     info[k] = info[k][0]
 
-            # Reward: 10.0 * won
             won = float(info.get("won", False))
             reward_val = 10.0 * won
 
-            # Update admissible commands
             admissible = info.get("admissible_commands", env_state["admissible_commands"])
             if isinstance(admissible, (list, tuple)) and admissible and isinstance(admissible[0], list):
                 admissible = admissible[0]
@@ -287,16 +323,12 @@ class AlfWorldInteraction(BaseInteraction):
             is_valid = False
             admissible = env_state["admissible_commands"]
 
-        # Store history (previous obs + action taken)
         env_state["history"].append((env_state["current_obs"], action))
-
-        # Update state
         env_state["current_obs"] = obs_text
         env_state["admissible_commands"] = admissible
         env_state["done"] = done or env_state["step_count"] >= self.max_steps
         should_terminate = env_state["done"]
 
-        # Build the next observation prompt
         next_prompt = self._build_observation_prompt(env_state)
 
         return should_terminate, next_prompt, reward_val, {
@@ -307,7 +339,12 @@ class AlfWorldInteraction(BaseInteraction):
         }
 
     async def finalize_interaction(self, instance_id: str = None, **kwargs) -> None:
-        """Clean up episode state. Does NOT close the shared game_env."""
+        """Clean up episode state and close per-episode env."""
         if instance_id is None:
             return
-        self.envs.pop(instance_id, None)
+        env_state = self.envs.pop(instance_id, None)
+        if env_state and env_state.get("game_env"):
+            try:
+                env_state["game_env"].close()
+            except Exception:
+                pass
