@@ -1284,8 +1284,11 @@ class RayPPOTrainer:
                                         num_valid = sum(1 for p in pairs if p is not None)
                                         metrics["opear/num_selected"] = len(selected_trajs)
                                         metrics["opear/num_valid_pairs"] = num_valid
+                                        metrics["opear/num_trajectories"] = len(trajectories)
+                                        metrics["opear/pair_success_rate"] = num_valid / max(len(selected_trajs), 1)
                                         print(f"[O-PEaR] {num_valid}/{len(selected_trajs)} valid contrastive pairs")
                                     else:
+                                        metrics["opear/num_valid_pairs"] = 0
                                         print("[O-PEaR] No valid contrastive pairs generated")
 
                     # update critic

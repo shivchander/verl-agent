@@ -73,8 +73,14 @@ def compute_opear_loss(
         "opear/loss": loss.detach().item(),
         "opear/compliant_logprob": compliant_norm_lp.mean().detach().item(),
         "opear/violating_logprob": violating_norm_lp.mean().detach().item(),
+        "opear/logprob_gap": (compliant_norm_lp - violating_norm_lp).mean().detach().item(),
         "opear/R_mean": R_mean.detach().item(),
+        "opear/R_std": R.std().detach().item() if num_pairs > 1 else 0.0,
+        "opear/R_min": R.min().detach().item(),
+        "opear/R_max": R.max().detach().item(),
         "opear/num_pairs": num_pairs,
+        "opear/compliant_length": compliant_lengths.mean().detach().item(),
+        "opear/violating_length": violating_lengths.mean().detach().item(),
     }
 
     return loss, metrics

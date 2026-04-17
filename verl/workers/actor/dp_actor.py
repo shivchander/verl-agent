@@ -523,6 +523,14 @@ class DataParallelPPOActor(BasePPOActor):
                 scaled_loss.backward()
 
                 opear_metrics["opear/scaled_loss"] = scaled_loss.detach().item()
+                opear_metrics["opear/lambda"] = opear_lambda
+                opear_metrics["opear/alpha"] = opear_alpha
+                # Log DrGRPO loss magnitude for comparison with O-PEaR
+                if "actor/pg_loss" in metrics:
+                    pg_losses = metrics["actor/pg_loss"]
+                    drgrpo_mag = pg_losses[-1] if isinstance(pg_losses, list) else pg_losses
+                    opear_metrics["opear/drgrpo_loss_magnitude"] = drgrpo_mag
+                    opear_metrics["opear/loss_ratio"] = abs(scaled_loss.detach().item()) / (abs(drgrpo_mag) + 1e-8)
                 append_to_dict(metrics, opear_metrics)
 
                 grad_norm = self._optimizer_step()
