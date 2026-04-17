@@ -1,0 +1,6 @@
+interaction:
+  - name: alfworld
+    class_name: alfworld_interaction.AlfWorldInteraction
+    config:
+      max_steps: 50
+      history_length: 2

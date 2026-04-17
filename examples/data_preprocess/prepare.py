@@ -78,12 +78,19 @@ if __name__ == '__main__':
                     "data_source": args.mode,
                     "prompt": [{
                         "role": "user",
-                        "content": prompt,
+                        "content": "You are starting a new task in the ALFRED Embodied Environment. Please wait for the observation.",
                     }],
                     "ability": "agent",
+                    "reward_model": {
+                        "style": "rule",
+                        "ground_truth": "",
+                    },
                     "extra_info": {
                         'split': split,
                         'index': idx,
+                        'interaction_kwargs': {
+                            'name': 'alfworld',
+                        },
                     }
                 }
             return data
