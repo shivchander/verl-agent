@@ -106,8 +106,6 @@ class AlfWorldInteraction(BaseInteraction):
         # Game file lists per split (lazy loaded)
         self._game_files: dict[str, list[str]] = {}
         self._alf_configs: dict[str, dict] = {}
-        # Track how many times each prompt_index has been seen (for cycling)
-        self._call_counts: dict[str, dict[int, int]] = {}  # split -> {index -> count}
         self._lock = threading.Lock()
 
     def _load_game_files(self, split: str) -> list[str]:
@@ -123,28 +121,25 @@ class AlfWorldInteraction(BaseInteraction):
             tw_env = get_environment("AlfredTWEnv")(alf_config, train_eval=alf_split)
             self._game_files[alf_split] = list(tw_env.game_files)
             self._alf_configs[alf_split] = alf_config
-            self._call_counts[alf_split] = {}
             logger.info(f"Loaded {len(tw_env.game_files)} games for split={alf_split}")
         return self._game_files[alf_split]
 
     def _select_game_index(self, split: str, prompt_index: int) -> int:
         """Select a game index deterministically based on prompt_index.
 
-        All rollouts with the same prompt_index (same GRPO group) get the
-        same game. Across epochs, the call_count increments so different
-        games are selected.
+        Pure function of prompt_index — all rollouts with the same index
+        (same GRPO group) get the same game, regardless of which worker
+        or interaction instance handles them. Each interaction instance is
+        created fresh per rollout in verl 0.7.1, so no mutable state can
+        be used for coordination.
+
+        This means the same 16 games are used each epoch. With 16 prompts
+        spread across 6 task types, the model sees diverse tasks each step.
         """
-        alf_split = SPLIT_MAP.get(split, "train")
         game_files = self._load_game_files(split)
         num_games = len(game_files)
-
-        with self._lock:
-            counts = self._call_counts[alf_split]
-            call_num = counts.get(prompt_index, 0)
-            counts[prompt_index] = call_num + 1
-
-        # Deterministic game selection: spread across game list
-        game_idx = (prompt_index + call_num * 16) % num_games
+        # Spread indices across game list using a stride
+        game_idx = (prompt_index * 223) % num_games  # 223 is prime, good spread
         return game_idx
 
     def _create_single_game_env(self, split: str, game_idx: int):
