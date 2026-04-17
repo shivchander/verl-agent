@@ -62,6 +62,14 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
 
+# O-PEaR imports (conditional)
+try:
+    from verl071.opear.guide import OPEaRGuide
+    from verl071.opear.data import reconstruct_trajectories, tokenize_contrastive_responses
+    OPEAR_AVAILABLE = True
+except ImportError:
+    OPEAR_AVAILABLE = False
+
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
 WorkerType = Type[Worker]
@@ -458,6 +466,20 @@ class RayPPOTrainer:
             raise NotImplementedError
 
         self._validate_config()
+
+        # Initialize O-PEaR if enabled
+        self.opear_enabled = self.config.algorithm.get("opear", {}).get("enable", False)
+        if self.opear_enabled:
+            assert OPEAR_AVAILABLE, "O-PEaR requires verl071.opear package"
+            opear_cfg = self.config.algorithm.opear
+            self.opear_guide = OPEaRGuide(
+                model=opear_cfg.get("guide_model", "gpt-5.4-nano"),
+                beta=opear_cfg.get("beta", 0.5),
+            )
+            self.opear_lambda = opear_cfg.get("lambda_coef", 0.5)
+            self.opear_alpha = opear_cfg.get("alpha", 0.5)
+            print(f"O-PEaR enabled: lambda={self.opear_lambda}, alpha={self.opear_alpha}, beta={opear_cfg.get('beta', 0.5)}")
+
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
     def _validate_config(self):
@@ -1234,6 +1256,37 @@ class RayPPOTrainer:
                             gigpo_enable_similarity= self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
                         )
+
+                    # O-PEaR: generate contrastive pairs from guide model
+                    if self.opear_enabled:
+                        with _timer("opear", timing_raw):
+                            trajectories = reconstruct_trajectories(batch, self.tokenizer)
+                            if trajectories:
+                                selected_uids = self.opear_guide.select_rollouts(
+                                    batch.non_tensor_batch.get("traj_uid", []),
+                                    self.config.actor_rollout_ref.rollout.n
+                                    if hasattr(self.config.actor_rollout_ref.rollout, 'n')
+                                    else self.config.env.rollout.n,
+                                )
+                                selected_trajs = [
+                                    t for t in trajectories if t["traj_uid"] in set(selected_uids)
+                                ]
+                                if selected_trajs:
+                                    pairs = self.opear_guide.generate_contrastive_batch(selected_trajs)
+                                    opear_data = tokenize_contrastive_responses(
+                                        selected_trajs, pairs, batch, self.tokenizer,
+                                        max_response_length=batch.batch["responses"].shape[-1],
+                                    )
+                                    if opear_data is not None:
+                                        batch.meta_info["opear_data"] = opear_data
+                                        batch.meta_info["opear_alpha"] = self.opear_alpha
+                                        batch.meta_info["opear_lambda"] = self.opear_lambda
+                                        num_valid = sum(1 for p in pairs if p is not None)
+                                        metrics["opear/num_selected"] = len(selected_trajs)
+                                        metrics["opear/num_valid_pairs"] = num_valid
+                                        print(f"[O-PEaR] {num_valid}/{len(selected_trajs)} valid contrastive pairs")
+                                    else:
+                                        print("[O-PEaR] No valid contrastive pairs generated")
 
                     # update critic
                     if self.use_critic:
