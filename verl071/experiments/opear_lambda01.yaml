@@ -1,0 +1,38 @@
+# O-PEaR experiment: lambda=0.1 (conservative regularization)
+experiment_name: opear_lambda01
+gpus: "4,5,6,7"
+
+opear:
+  enable: true
+  lambda_coef: 0.1
+  alpha: 0.5
+  beta: 0.5
+  guide_model: gpt-5.4-nano
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: false
+  gamma: 0.95
+
+model:
+  path: Qwen/Qwen3-4B
+
+training:
+  lr: 1.0e-6
+  total_epochs: 250
+  group_size: 8
+  train_batch_size: 16
+  val_batch_size: 134
+  max_response_length: 15360
+  max_prompt_length: 2048
+  save_freq: 50
+  test_freq: 5
+
+rollout:
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.5
+  max_model_len: 18432
+  max_turns: 50
+  history_length: 2
+  temperature: 0.4
