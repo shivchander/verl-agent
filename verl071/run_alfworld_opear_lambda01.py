@@ -1,4 +1,4 @@
-"""Run ALFWorld Dr. GRPO + O-PEaR training — lambda=0.3 ablation on GPUs 0-3."""
+"""Run ALFWorld Dr. GRPO + O-PEaR training — lambda=0.1 ablation on GPUs 0-3."""
 import os
 import subprocess
 import sys
@@ -31,9 +31,9 @@ cmd = [
     "algorithm.use_kl_in_reward=False",
     "algorithm.norm_adv_by_std_in_grpo=False",
     "algorithm.gamma=0.95",
-    # O-PEaR: lambda=0.3 ablation
+    # O-PEaR: lambda=0.1 ablation
     "+algorithm.opear.enable=True",
-    "+algorithm.opear.lambda_coef=0.3",
+    "+algorithm.opear.lambda_coef=0.1",
     "+algorithm.opear.alpha=0.5",
     "+algorithm.opear.beta=0.5",
     "+algorithm.opear.guide_model=gpt-5.4-nano",
@@ -97,7 +97,7 @@ cmd = [
     "trainer.val_before_train=True",
     'trainer.logger=["console","wandb"]',
     "trainer.project_name=verl_agent_alfworld",
-    "trainer.experiment_name=drgrpo_opear_lambda03_qwen3_4b",
+    "trainer.experiment_name=drgrpo_opear_lambda01_qwen3_4b",
 ]
 
 env = os.environ.copy()
@@ -109,10 +109,10 @@ env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 env["TMPDIR"] = "/mnt/nvme0n1/tmp"
 env["RAY_TMPDIR"] = "/mnt/nvme0n1/tmp"
 
-print(f"Launching verl ALFWorld Dr. GRPO + O-PEaR training (lambda=0.3)")
+print(f"Launching verl ALFWorld Dr. GRPO + O-PEaR training (lambda=0.1)")
 print(f"  Model: Qwen3-4B | GPUs: {env['CUDA_VISIBLE_DEVICES']} | TP=2")
 print(f"  Dr. GRPO: no ref model, token-level normalization")
-print(f"  O-PEaR: lambda=0.3, alpha=0.5, beta=0.5, guide=gpt-5.4-nano")
+print(f"  O-PEaR: lambda=0.1, alpha=0.5, beta=0.5, guide=gpt-5.4-nano")
 print(f"  Batch: {TRAIN_DATA_SIZE} x {GROUP_SIZE} group = {TRAIN_DATA_SIZE * GROUP_SIZE} rollouts/step")
 print(f"  Epochs: 250 | Response budget: 15360 | Max steps: 50 | gamma: 0.95")
 
