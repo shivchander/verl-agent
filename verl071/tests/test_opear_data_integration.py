@@ -67,7 +67,7 @@ def build_mock_batch(tokenizer, num_prompts=2, group_size=2):
     resp_len = len(response_ids)
 
     # Pad to a fixed response length
-    max_response_length = resp_len + 50  # some padding
+    max_response_length = resp_len + 500  # generous budget for guide rewrites
     pad_len = max_response_length - resp_len
     pad_id = tokenizer.pad_token_id or 0
     response_ids_padded = response_ids + [pad_id] * pad_len
@@ -221,68 +221,74 @@ def test_full_pipeline():
             f"Violating pair {i}: prompt tokens differ!"
     print("  PASS: Prompt tokens identical across all variants")
 
-    # Verify: observation tokens (response_mask=0 regions) are identical
+    # Verify: observation tokens are present in contrastive sequences
+    # (positions may differ from original since rewrites change length)
     orig_input = batch.batch["input_ids"][positions[0]]
     orig_resp_mask = batch.batch["response_mask"][positions[0]]
+
+    # Extract original observation token sequences
+    orig_obs_tokens = []
+    prev_end = 0
+    for s, e in expected_segments:
+        if s > prev_end:
+            obs = batch.batch["responses"][positions[0]][prev_end:s]
+            orig_obs_tokens.append(obs)
+        prev_end = e
+
+    # Check that each observation sequence appears in the contrastive sequences
     for i in range(num_pairs):
-        orig_resp = orig_input[prompt_len:]
-        c_resp = c_ids[i, prompt_len:]
-        v_resp = v_ids[i, prompt_len:]
-        obs_positions = (orig_resp_mask == 0).nonzero(as_tuple=True)[0]
+        c_full = c_ids[i]
+        v_full = v_ids[i]
+        for j, obs in enumerate(orig_obs_tokens):
+            obs_text = tokenizer.decode(obs, skip_special_tokens=True).strip()
+            c_text = tokenizer.decode(c_full, skip_special_tokens=True)
+            v_text = tokenizer.decode(v_full, skip_special_tokens=True)
+            assert obs_text in c_text, \
+                f"Pair {i}: observation {j} not found in compliant sequence"
+            assert obs_text in v_text, \
+                f"Pair {i}: observation {j} not found in violating sequence"
+    print("  PASS: Observation tokens present in all variants")
 
-        # Only check non-padding observation tokens
-        orig_attn = batch.batch["attention_mask"][positions[0]]
-        for pos in obs_positions:
-            abs_pos = prompt_len + pos
-            if orig_attn[abs_pos] == 1:  # non-padding
-                assert c_resp[pos] == orig_resp[pos], \
-                    f"Pair {i}: compliant obs token at pos {pos} differs! {c_resp[pos]} != {orig_resp[pos]}"
-                assert v_resp[pos] == orig_resp[pos], \
-                    f"Pair {i}: violating obs token at pos {pos} differs! {v_resp[pos]} != {orig_resp[pos]}"
-    print("  PASS: Observation tokens identical across all variants")
-
-    # Verify: assistant tokens (response_mask=1 regions) are DIFFERENT
+    # Verify: compliant and violating differ
     for i in range(num_pairs):
-        c_resp = c_ids[i, prompt_len:]
-        v_resp = v_ids[i, prompt_len:]
-        orig_resp = orig_input[prompt_len:]
+        assert not torch.equal(c_ids[i], v_ids[i]), \
+            f"Pair {i}: compliant and violating sequences are identical!"
+    print("  PASS: Compliant and violating sequences differ")
 
-        for seg_start, seg_end in expected_segments:
-            c_seg = c_resp[seg_start:seg_end]
-            v_seg = v_resp[seg_start:seg_end]
-            o_seg = orig_resp[seg_start:seg_end]
-
-            # Compliant and violating should differ from each other
-            assert not torch.equal(c_seg, v_seg), \
-                f"Pair {i}: compliant and violating are identical at segment ({seg_start},{seg_end})!"
-    print("  PASS: Assistant tokens differ between compliant and violating")
-
-    # Verify: response_mask marks only actual rewrite tokens (not padding within segments)
+    # Verify: response_mask marks rewrite tokens
     for i in range(num_pairs):
         c_rm = c_mask[i]
-        # response_mask should have 1s only where there are actual rewrite tokens
-        # (may be fewer than original segment if rewrite is shorter)
         assert c_rm.sum() > 0, f"Pair {i}: compliant response_mask is all zeros!"
-        assert c_rm.sum() <= orig_resp_mask.sum(), \
-            f"Pair {i}: compliant mask has more 1s than original!"
     print("  PASS: Response masks correctly mark rewrite tokens")
 
-    # Decode and show a sample
+    # Verify: no truncation — decode response_mask=1 regions and check for complete tags
+    for i in range(num_pairs):
+        c_rm = c_mask[i]
+        c_resp = c_ids[i, prompt_len:]
+        # Get rewrite tokens
+        rewrite_positions = (c_rm == 1).nonzero(as_tuple=True)[0]
+        if len(rewrite_positions) > 0:
+            rewrite_text = tokenizer.decode(c_resp[rewrite_positions], skip_special_tokens=True)
+            # Should contain complete action tags (not truncated)
+            assert "<action>" in rewrite_text or len(rewrite_text) < 10, \
+                f"Pair {i}: rewrite appears truncated — no <action> tag found: {rewrite_text[:80]}..."
+    print("  PASS: Rewrites contain complete tags (no truncation)")
+
+    # Decode and show a sample — extract rewrite turns from response_mask
     print(f"\n=== Sample decoded (pair 0) ===")
     print(f"  Original assistant turns:")
     for j, (s, e) in enumerate(expected_segments):
         orig_text = tokenizer.decode(orig_input[prompt_len + s:prompt_len + e], skip_special_tokens=True)
         print(f"    Turn {j+1}: {orig_text[:80]}...")
 
-    print(f"  Compliant rewrites:")
-    for j, (s, e) in enumerate(expected_segments):
-        c_text = tokenizer.decode(c_ids[0, prompt_len + s:prompt_len + e], skip_special_tokens=True)
-        print(f"    Turn {j+1}: {c_text[:80]}...")
-
-    print(f"  Violating rewrites:")
-    for j, (s, e) in enumerate(expected_segments):
-        v_text = tokenizer.decode(v_ids[0, prompt_len + s:prompt_len + e], skip_special_tokens=True)
-        print(f"    Turn {j+1}: {v_text[:80]}...")
+    # For contrastive: find rewrite segments from response_mask
+    for label, ids, mask in [("Compliant", c_ids[0], c_mask[0]), ("Violating", v_ids[0], v_mask[0])]:
+        resp_part = ids[prompt_len:]
+        segs = _find_assistant_segments(mask)
+        print(f"  {label} rewrites:")
+        for j, (s, e) in enumerate(segs):
+            text = tokenizer.decode(resp_part[s:e], skip_special_tokens=True)
+            print(f"    Turn {j+1}: {text[:80]}...")
 
     print("\n=== ALL TESTS PASSED ===")
 

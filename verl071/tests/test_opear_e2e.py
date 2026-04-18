@@ -68,7 +68,7 @@ def build_realistic_batch(tokenizer):
             response_mask.extend([0] * len(obs_ids_list[i]))
 
     resp_len = len(response_ids)
-    max_response_length = resp_len + 20
+    max_response_length = resp_len + 500  # generous budget for guide rewrites
     pad_len = max_response_length - resp_len
     pad_id = tokenizer.pad_token_id or 0
 
@@ -274,22 +274,30 @@ def main():
     prompt_match = torch.equal(c_ids[0, :prompt_len], orig_ids[:prompt_len])
     log(f"Prompt preserved: {prompt_match}")
 
-    # Check observation preservation
+    # Check observations are present (not at same positions — rebuild shifts them)
     orig_rm = batch.batch["response_mask"][positions[0]]
-    obs_ok = True
-    for pos in range(len(orig_rm)):
-        if orig_rm[pos] == 0 and batch.batch["attention_mask"][positions[0], prompt_len + pos] == 1:
-            if orig_ids[prompt_len + pos] != c_ids[0, prompt_len + pos]:
-                obs_ok = False
-                break
-    log(f"Observations preserved: {obs_ok}")
+    orig_resp = batch.batch["responses"][positions[0]]
+    # Extract original observation text between segments
+    obs_texts = []
+    prev_end = 0
+    for s, e in segments:
+        if s > prev_end:
+            obs_text = tokenizer.decode(orig_resp[prev_end:s], skip_special_tokens=True).strip()
+            if obs_text:
+                obs_texts.append(obs_text)
+        prev_end = e
+    c_full_text = tokenizer.decode(c_ids[0], skip_special_tokens=True)
+    obs_ok = all(obs in c_full_text for obs in obs_texts)
+    log(f"Observations present in contrastive: {obs_ok}")
 
-    # Show token counts per segment
-    for i, (s, e) in enumerate(segments):
-        c_active = int(c_mask[0, s:e].sum())
-        v_active = int(v_mask[0, s:e].sum())
-        orig_active = int(orig_rm[s:e].sum())
-        log(f"  Segment {i+1} ({s}-{e}): orig={orig_active}, compliant={c_active}, violating={v_active}")
+    # Show token counts using rebuilt segment boundaries
+    from verl071.opear.data import _find_assistant_segments
+    orig_segs = _find_assistant_segments(orig_rm)
+    c_segs = _find_assistant_segments(c_mask[0])
+    v_segs = _find_assistant_segments(v_mask[0])
+    log(f"  Original segments: {[(s, e, e-s) for s, e in orig_segs]}")
+    log(f"  Compliant segments: {[(s, e, e-s) for s, e in c_segs]}")
+    log(f"  Violating segments: {[(s, e, e-s) for s, e in v_segs]}")
 
     # ── Step 8: Forward pass for contrastive log-probs ──
     log("\n" + "=" * 70)

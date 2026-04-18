@@ -175,83 +175,107 @@ def _response_text_from_turn(turn) -> str:
     return str(turn)
 
 
-def _swap_assistant_segments(
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    response_mask: torch.Tensor,
-    prompt_len: int,
+def _build_contrastive_sequence(
+    prompt_ids: torch.Tensor,
+    orig_response_ids: torch.Tensor,
+    orig_response_mask: torch.Tensor,
     segments: list[tuple[int, int]],
     rewrite_turns: list,
     tokenizer,
     pad_token_id: int,
+    max_seq_len: int,
 ) -> Optional[dict]:
-    """Create a contrastive sequence by swapping assistant tokens in-place.
+    """Build a contrastive sequence by reassembling prompt + observations + rewrites.
 
-    Keeps the full original sequence (prompt + interleaved observations)
-    identical. Only replaces the tokens in assistant segments with the
-    guide's rewrite tokens, truncating or padding each segment to match
-    the original segment length.
+    Keeps prompt and observation tokens from the original. Replaces each
+    assistant segment with the guide's full rewrite (no truncation).
+    Pads the result to max_seq_len.
 
     Args:
-        input_ids: Original full sequence (prompt_len + response_len,).
-        attention_mask: Original attention mask, same shape.
-        response_mask: Original response mask (response_len,).
-            1 for model-generated, 0 for user/observation.
-        prompt_len: Length of the prompt portion.
-        segments: List of (start, end) pairs within the response portion
-            marking assistant turns.
-        rewrite_turns: Guide's rewritten turns (list of dicts or strings),
-            one per assistant segment.
+        prompt_ids: Original prompt tokens (prompt_len,).
+        orig_response_ids: Original response tokens (response_len,).
+        orig_response_mask: Original response mask (response_len,).
+        segments: List of (start, end) pairs within the response marking
+            assistant turns.
+        rewrite_turns: Guide's rewritten turns, one per segment.
         tokenizer: For encoding rewrite text.
-        pad_token_id: Token ID used for padding within segments.
+        pad_token_id: Token ID for padding.
+        max_seq_len: Pad all sequences to this length.
 
     Returns:
-        Dict with input_ids, attention_mask, response_mask tensors,
-        or None if no segments could be matched.
+        Dict with input_ids, attention_mask, response_mask, or None.
     """
     num_turns = min(len(segments), len(rewrite_turns))
     if num_turns == 0:
         return None
 
-    new_input_ids = input_ids.clone()
-    new_attn_mask = attention_mask.clone()
-    new_resp_mask = response_mask.clone()
+    prompt_len = prompt_ids.shape[0]
 
+    # Collect pieces: prompt, then alternating [obs, rewrite] blocks
+    token_pieces: list[torch.Tensor] = [prompt_ids]
+    mask_pieces: list[torch.Tensor] = []  # 1 for rewrite, 0 for obs
+
+    prev_end = 0  # tracks position in response portion
     for t in range(num_turns):
         seg_start, seg_end = segments[t]
-        seg_len = seg_end - seg_start
 
-        # Tokenize the guide's rewrite for this turn
+        # Observation tokens before this assistant segment
+        if seg_start > prev_end:
+            obs_ids = orig_response_ids[prev_end:seg_start]
+            token_pieces.append(obs_ids)
+            mask_pieces.append(torch.zeros(len(obs_ids), dtype=torch.float32))
+
+        # Guide's rewrite for this turn (full, no truncation)
         text = _response_text_from_turn(rewrite_turns[t])
         rewrite_ids = tokenizer.encode(text, add_special_tokens=False)
+        rewrite_tensor = torch.tensor(rewrite_ids, dtype=prompt_ids.dtype)
+        token_pieces.append(rewrite_tensor)
+        mask_pieces.append(torch.ones(len(rewrite_ids), dtype=torch.float32))
 
-        # Truncate or pad to match the original segment length
-        actual_len = min(len(rewrite_ids), seg_len)
-        pad_len = seg_len - actual_len
+        prev_end = seg_end
 
-        # Write rewrite tokens into the response portion of input_ids
-        offset = prompt_len + seg_start
-        new_input_ids[offset:offset + actual_len] = torch.tensor(
-            rewrite_ids[:actual_len], dtype=input_ids.dtype
-        )
-        # Pad remainder of segment with pad_token_id
-        if pad_len > 0:
-            new_input_ids[offset + actual_len:offset + seg_len] = pad_token_id
+    # Trailing observation tokens after the last segment
+    if prev_end < len(orig_response_ids):
+        # Only include non-padding trailing tokens
+        trailing = orig_response_ids[prev_end:]
+        # Find where actual content ends (before original padding)
+        orig_attn_len = int(orig_response_mask[prev_end:].sum().item())
+        # Include observation tokens (mask=0) that aren't padding
+        content_end = prev_end
+        for i in range(prev_end, len(orig_response_ids)):
+            if orig_response_ids[i] == pad_token_id and orig_response_mask[i] == 0:
+                break
+            content_end = i + 1
+        if content_end > prev_end:
+            trailing_ids = orig_response_ids[prev_end:content_end]
+            token_pieces.append(trailing_ids)
+            mask_pieces.append(torch.zeros(len(trailing_ids), dtype=torch.float32))
 
-        # Keep attention_mask=1 for the ENTIRE segment (including padding).
-        # Zeroing attention within a sequence creates holes that break causal
-        # attention and unpad_input in flash attention. The pad tokens produce
-        # garbage logits but response_mask=0 ensures they don't affect the loss.
-        new_attn_mask[offset:offset + seg_len] = 1
+    # Concatenate all pieces
+    full_ids = torch.cat(token_pieces)
+    response_mask = torch.cat(mask_pieces) if mask_pieces else torch.zeros(0, dtype=torch.float32)
 
-        # Update response_mask: only compute loss on actual rewrite tokens
-        new_resp_mask[seg_start:seg_start + actual_len] = 1
-        new_resp_mask[seg_start + actual_len:seg_end] = 0
+    real_len = len(full_ids)
+    resp_len = len(response_mask)
+
+    # Pad or truncate to max_seq_len
+    if real_len < max_seq_len:
+        pad_len = max_seq_len - real_len
+        full_ids = torch.cat([full_ids, torch.full((pad_len,), pad_token_id, dtype=full_ids.dtype)])
+        response_mask = torch.cat([response_mask, torch.zeros(pad_len, dtype=torch.float32)])
+    elif real_len > max_seq_len:
+        full_ids = full_ids[:max_seq_len]
+        resp_len_new = max_seq_len - prompt_len
+        response_mask = response_mask[:resp_len_new]
+
+    # Build attention mask: 1 for real tokens, 0 for padding
+    attn_mask = torch.zeros(len(full_ids), dtype=torch.long)
+    attn_mask[:min(real_len, max_seq_len)] = 1
 
     return {
-        "input_ids": new_input_ids,
-        "attention_mask": new_attn_mask,
-        "response_mask": new_resp_mask,
+        "input_ids": full_ids,
+        "attention_mask": attn_mask,
+        "response_mask": response_mask,
     }
 
 
@@ -262,16 +286,14 @@ def tokenize_contrastive_responses(
     tokenizer,
     max_response_length: int,
 ) -> Optional[dict]:
-    """Create contrastive sequences by swapping assistant content in-place.
+    """Build contrastive sequences from prompt + observations + guide rewrites.
 
-    For each selected rollout, takes the ORIGINAL full sequence (prompt +
-    multi-turn response with interleaved observations) and replaces only
-    the assistant-generated segments with the guide's rewrites. The
-    observation tokens, prompt, and overall structure stay identical.
+    For each selected rollout, reassembles a new sequence using:
+    - The original prompt tokens (unchanged)
+    - The original observation tokens between turns (unchanged)
+    - The guide's full rewrite for each assistant turn (no truncation)
 
-    This ensures the contrastive log-probs are computed in the same context
-    as the original rollout — the model sees the full conversation history
-    with only the assistant actions changed.
+    All sequences are padded to the same length for batching.
 
     Args:
         trajectories: Output of reconstruct_trajectories, each with
@@ -280,8 +302,7 @@ def tokenize_contrastive_responses(
             'compliant' and 'violating' turn lists.
         batch: Original training batch.
         tokenizer: For encoding guide responses.
-        max_response_length: For tensor sizing (unused for structure,
-            but kept for API compat).
+        max_response_length: Used for max sequence length calculation.
 
     Returns:
         Dict with stacked tensors for compliant and violating sequences,
@@ -298,25 +319,23 @@ def tokenize_contrastive_responses(
 
         batch_pos = traj["turn_indices"][0]
         segments = traj["assistant_segments"]
-
-        # Get the original full sequence
-        orig_input_ids = batch.batch["input_ids"][batch_pos]
-        orig_attn_mask = batch.batch["attention_mask"][batch_pos]
+        prompt_ids = batch.batch["prompts"][batch_pos]
+        orig_resp_ids = batch.batch["responses"][batch_pos]
         orig_resp_mask = batch.batch["response_mask"][batch_pos]
-        prompt_len = batch.batch["prompts"][batch_pos].shape[0]
+        prompt_len = prompt_ids.shape[0]
 
-        compliant_turns = pair["compliant"]
-        violating_turns = pair["violating"]
+        # Max sequence length = prompt + max_response_length (same as original batch)
+        max_seq_len = prompt_len + max_response_length
 
-        c_entry = _swap_assistant_segments(
-            orig_input_ids, orig_attn_mask, orig_resp_mask,
-            prompt_len, segments, compliant_turns,
-            tokenizer, pad_token_id,
+        c_entry = _build_contrastive_sequence(
+            prompt_ids, orig_resp_ids, orig_resp_mask,
+            segments, pair["compliant"],
+            tokenizer, pad_token_id, max_seq_len,
         )
-        v_entry = _swap_assistant_segments(
-            orig_input_ids, orig_attn_mask, orig_resp_mask,
-            prompt_len, segments, violating_turns,
-            tokenizer, pad_token_id,
+        v_entry = _build_contrastive_sequence(
+            prompt_ids, orig_resp_ids, orig_resp_mask,
+            segments, pair["violating"],
+            tokenizer, pad_token_id, max_seq_len,
         )
 
         if c_entry is not None and v_entry is not None:
@@ -326,14 +345,23 @@ def tokenize_contrastive_responses(
     if not compliant_entries:
         return None
 
-    def stack(entries: list[dict], key: str) -> torch.Tensor:
-        return torch.stack([e[key] for e in entries])
+    def pad_and_stack(entries: list[dict], key: str) -> torch.Tensor:
+        """Pad all entries to the same length, then stack."""
+        max_len = max(e[key].shape[0] for e in entries)
+        padded = []
+        for e in entries:
+            t = e[key]
+            if t.shape[0] < max_len:
+                pad = torch.zeros(max_len - t.shape[0], dtype=t.dtype)
+                t = torch.cat([t, pad])
+            padded.append(t)
+        return torch.stack(padded)
 
     return {
-        "compliant_input_ids": stack(compliant_entries, "input_ids"),
-        "compliant_attention_mask": stack(compliant_entries, "attention_mask"),
-        "compliant_response_mask": stack(compliant_entries, "response_mask"),
-        "violating_input_ids": stack(violating_entries, "input_ids"),
-        "violating_attention_mask": stack(violating_entries, "attention_mask"),
-        "violating_response_mask": stack(violating_entries, "response_mask"),
+        "compliant_input_ids": pad_and_stack(compliant_entries, "input_ids"),
+        "compliant_attention_mask": pad_and_stack(compliant_entries, "attention_mask"),
+        "compliant_response_mask": pad_and_stack(compliant_entries, "response_mask"),
+        "violating_input_ids": pad_and_stack(violating_entries, "input_ids"),
+        "violating_attention_mask": pad_and_stack(violating_entries, "attention_mask"),
+        "violating_response_mask": pad_and_stack(violating_entries, "response_mask"),
     }
