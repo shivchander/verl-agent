@@ -3,4 +3,4 @@ experiment_name: drgrpo_opear_logsigmoid_qwen3_4b
 gpus: "0,1,2,3"
 opear_lambda: 0.5
 opear_loss_type: logsigmoid
-opear_loss_beta: 1.0
+opear_loss_beta: 0.1

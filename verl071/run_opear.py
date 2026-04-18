@@ -41,7 +41,7 @@ DEFAULTS = {
     "opear_selection_ratio": 0.5,
     "opear_guide_model": "gpt-5.4-nano",
     "opear_loss_type": "unbounded",
-    "opear_loss_beta": 1.0,
+    "opear_loss_beta": 0.1,
     # Agent loop
     "max_user_turns": 50,
     # Trainer
