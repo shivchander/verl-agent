@@ -85,7 +85,11 @@ def _generate_contrastive_data(trainer, batch):
         print("[O-PEaR] no trajectories reconstructed, skipping")
         return
 
+    import time
+    t0 = time.time()
     pairs = trainer.opear_guide.generate_contrastive_batch(selected)
+    guide_time = time.time() - t0
+
     opear_data = tokenize_contrastive_responses(
         selected, pairs, batch, trainer.tokenizer,
         max_response_length=batch.batch["responses"].shape[-1],
@@ -96,7 +100,13 @@ def _generate_contrastive_data(trainer, batch):
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
         batch.meta_info["opear_loss_type"] = trainer.opear_loss_type
         batch.meta_info["opear_loss_beta"] = trainer.opear_loss_beta
+        batch.meta_info["opear_selection_ratio"] = trainer.opear_selection_ratio
+        batch.meta_info["opear_guide_time_s"] = guide_time
+        # Mean assistant segments per trajectory (how multi-turn the rollouts are)
+        mean_segments = sum(len(t["assistant_segments"]) for t in selected) / max(len(selected), 1)
+        batch.meta_info["opear_num_segments"] = mean_segments
         n = sum(1 for p in pairs if p is not None)
-        print(f"[O-PEaR] {n}/{len(selected)} valid contrastive pairs")
+        print(f"[O-PEaR] {n}/{len(selected)} valid contrastive pairs in {guide_time:.1f}s "
+              f"({mean_segments:.1f} turns/traj)")
     else:
         print("[O-PEaR] no valid contrastive pairs")
