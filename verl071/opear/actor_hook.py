@@ -3,6 +3,10 @@
 Called from inside update_policy (via verl patch) between the GRPO backward
 pass and optimizer.step(). Computes O-PEaR contrastive loss and calls
 backward(), accumulating gradients with the existing GRPO gradients.
+
+Uses micro-batching (one pair at a time) to avoid OOM — GRPO processes
+sequences with micro_batch_size=1, so forwarding all N contrastive pairs
+at once would exceed GPU memory.
 """
 
 import torch
@@ -11,6 +15,10 @@ from verl071.opear.loss import compute_opear_loss
 
 def opear_accumulate_gradients(actor, data, metrics):
     """Compute O-PEaR loss and accumulate gradients (no optimizer step).
+
+    Processes one contrastive pair at a time to match GRPO's memory footprint.
+    Each per-pair loss is scaled by 1/N before backward so that the accumulated
+    gradients equal the gradient of the mean loss over all pairs.
 
     Args:
         actor: DataParallelPPOActor instance (has _forward_micro_batch, actor_module)
@@ -39,55 +47,122 @@ def opear_accumulate_gradients(actor, data, metrics):
     v_attn = opear_data["violating_attention_mask"].to(device)
     v_mask = opear_data["violating_response_mask"].to(device)
 
+    num_pairs = c_ids.shape[0]
     resp_len = c_mask.shape[-1]
-
-    c_out = actor._forward_micro_batch(
-        micro_batch={"input_ids": c_ids, "attention_mask": c_attn,
-                     "position_ids": compute_position_id_with_mask(c_attn),
-                     "responses": c_ids[:, -resp_len:]},
-        temperature=temperature, calculate_entropy=False)
-    c_lp = c_out["log_probs"]
-
-    v_out = actor._forward_micro_batch(
-        micro_batch={"input_ids": v_ids, "attention_mask": v_attn,
-                     "position_ids": compute_position_id_with_mask(v_attn),
-                     "responses": v_ids[:, -resp_len:]},
-        temperature=temperature, calculate_entropy=False)
-    v_lp = v_out["log_probs"]
-
-    c_lp = c_lp[:, :resp_len]
-    v_lp = v_lp[:, :resp_len]
-    c_rm = c_mask[:, :c_lp.shape[-1]]
-    v_rm = v_mask[:, :v_lp.shape[-1]]
-
-    loss, opear_metrics = compute_opear_loss(
-        c_lp, c_rm, v_lp, v_rm, alpha=alpha, loss_type=loss_type, beta=beta)
 
     # Scale to match GRPO gradient magnitude. GRPO's agg_loss divides by
     # loss_scale_factor (a constant normalizer, typically = max_response_length).
     # OPEAR runs once per mini-batch (not per micro-batch), so we only need
-    # the loss_scale_factor — NOT gradient_accumulation — to put both losses
+    # the loss_scale_factor -- NOT gradient_accumulation -- to put both losses
     # on the same footing. This makes lambda=1 mean "equal gradient magnitude."
     loss_sf = getattr(actor.config, "loss_scale_factor", None)
     if loss_sf is None or loss_sf <= 0:
         import logging
         logging.getLogger(__name__).warning(
-            "loss_scale_factor not found on actor.config — OPEAR gradient scaling "
+            "loss_scale_factor not found on actor.config -- OPEAR gradient scaling "
             "may be wrong. Falling back to gradient_accumulation."
         )
         loss_sf = getattr(actor, "gradient_accumulation", 1)
-    # Snapshot grad norm BEFORE opear backward (captures GRPO-only grads)
+
+    # Snapshot grad norm BEFORE any O-PEaR backward (captures GRPO-only grads)
     grpo_grad_norm = _grad_norm(actor.actor_module)
 
-    scaled = lam * loss / loss_sf
-    scaled.backward()
+    # Accumulators for metrics (averaged over pairs at the end)
+    total_loss = 0.0
+    total_scaled_loss = 0.0
+    agg_metrics = {}
+    gap_values = []
 
-    # Grad norm AFTER opear backward (captures GRPO + OPEAR combined)
+    # --- Micro-batched loop: one pair at a time ---
+    for i in range(num_pairs):
+        # Slice out the i-th pair (keep batch dim via [i:i+1])
+        ci_ids = c_ids[i : i + 1]
+        ci_attn = c_attn[i : i + 1]
+        ci_mask = c_mask[i : i + 1]
+        vi_ids = v_ids[i : i + 1]
+        vi_attn = v_attn[i : i + 1]
+        vi_mask = v_mask[i : i + 1]
+
+        # Forward compliant sequence
+        c_out = actor._forward_micro_batch(
+            micro_batch={
+                "input_ids": ci_ids,
+                "attention_mask": ci_attn,
+                "position_ids": compute_position_id_with_mask(ci_attn),
+                "responses": ci_ids[:, -resp_len:],
+            },
+            temperature=temperature,
+            calculate_entropy=False,
+        )
+        c_lp = c_out["log_probs"][:, :resp_len]
+
+        # Forward violating sequence
+        v_out = actor._forward_micro_batch(
+            micro_batch={
+                "input_ids": vi_ids,
+                "attention_mask": vi_attn,
+                "position_ids": compute_position_id_with_mask(vi_attn),
+                "responses": vi_ids[:, -resp_len:],
+            },
+            temperature=temperature,
+            calculate_entropy=False,
+        )
+        v_lp = v_out["log_probs"][:, :resp_len]
+
+        ci_rm = ci_mask[:, : c_lp.shape[-1]]
+        vi_rm = vi_mask[:, : v_lp.shape[-1]]
+
+        # compute_opear_loss with N=1 returns the single-pair loss (mean is a
+        # no-op for a single element). We scale by 1/num_pairs so that the
+        # sum of backward passes yields grad(mean_loss).
+        pair_loss, pair_metrics = compute_opear_loss(
+            c_lp, ci_rm, v_lp, vi_rm, alpha=alpha, loss_type=loss_type, beta=beta
+        )
+
+        scaled = lam * pair_loss / (loss_sf * num_pairs)
+        scaled.backward()
+
+        total_loss += pair_loss.detach().item()
+        total_scaled_loss += scaled.detach().item()
+
+        # Accumulate per-pair metrics for later averaging
+        for k, v in pair_metrics.items():
+            agg_metrics[k] = agg_metrics.get(k, 0.0) + v
+
+        # Track individual gap values for proper min/max/std
+        gap_values.append(pair_metrics.get("opear/logprob_gap", 0.0))
+
+    # Grad norm AFTER all O-PEaR backwards (captures GRPO + OPEAR combined)
     combined_grad_norm = _grad_norm(actor.actor_module)
-    # OPEAR contribution ≈ combined - grpo (approximate, not exact due to direction)
+    # OPEAR contribution ~ combined - grpo (approximate, not exact due to direction)
     opear_grad_norm = abs(combined_grad_norm - grpo_grad_norm)
 
-    opear_metrics["opear/scaled_loss"] = scaled.detach().item()
+    # Build final metrics: average per-pair values, keep num_pairs as total.
+    # gap_min/gap_max/gap_std are recomputed from collected per-pair gaps
+    # since N=1 calls can't compute meaningful min/max/std individually.
+    opear_metrics = {}
+    for k, v in agg_metrics.items():
+        if k == "opear/num_pairs":
+            opear_metrics[k] = num_pairs
+        elif k in ("opear/gap_std", "opear/gap_min", "opear/gap_max"):
+            continue  # handled below from gap_values
+        else:
+            opear_metrics[k] = v / num_pairs
+
+    if gap_values:
+        gap_t = torch.tensor(gap_values)
+        opear_metrics["opear/gap_min"] = gap_t.min().item()
+        opear_metrics["opear/gap_max"] = gap_t.max().item()
+        opear_metrics["opear/gap_std"] = gap_t.std().item() if num_pairs > 1 else 0.0
+    else:
+        opear_metrics["opear/gap_min"] = 0.0
+        opear_metrics["opear/gap_max"] = 0.0
+        opear_metrics["opear/gap_std"] = 0.0
+
+    # Override loss with the proper mean (not the per-pair average of
+    # compute_opear_loss which is the same thing for N=1, but be explicit)
+    opear_metrics["opear/loss"] = total_loss / num_pairs
+    opear_metrics["opear/scaled_loss"] = total_scaled_loss
     opear_metrics["opear/loss_scale_factor"] = float(loss_sf)
     opear_metrics["opear/grad_norm"] = opear_grad_norm
     opear_metrics["opear/grpo_grad_norm"] = grpo_grad_norm
