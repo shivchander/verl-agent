@@ -1,6 +1,44 @@
 # O-PEaR with logsigmoid loss, lambda=0.1 — weak bounded regularization
 experiment_name: drgrpo_opear_logsigmoid_lambda01_qwen3_4b
 gpus: "4,5,6,7"
+
+# O-PEaR config
+opear_enable: true
 opear_lambda: 0.1
+opear_alpha: 0.5
+opear_selection_ratio: 0.5
+opear_guide_model: gpt-5.4-nano
 opear_loss_type: logsigmoid
 opear_loss_beta: 0.1
+
+# Model
+model: Qwen/Qwen3-4B
+tp: 2
+gpu_memory_utilization: 0.5
+max_model_len: 18432
+
+# Data
+group_size: 8
+train_batch_size: 16
+val_batch_size: 134
+max_prompt_length: 2048
+max_response_length: 15360
+seed: 42
+
+# Actor
+lr: 1.0e-6
+loss_agg_mode: seq-mean-token-sum-norm
+
+# Algorithm
+gamma: 0.95
+
+# Agent loop
+max_user_turns: 50
+
+# Trainer
+epochs: 250
+save_freq: 30
+test_freq: 5
+val_before_train: true
+logger: '["console","wandb"]'
+project_name: verl_agent_alfworld
