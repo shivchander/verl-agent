@@ -50,7 +50,7 @@ DEFAULTS = {
     "test_freq": 5,
     "val_before_train": True,
     "logger": '["console","wandb"]',
-    "project_name": "verl_agent_alfworld",
+    "project_name": "opear_alfworld",
     "experiment_name": "drgrpo_opear_qwen3_4b",
     # Infra
     "gpus": "4,5,6,7",

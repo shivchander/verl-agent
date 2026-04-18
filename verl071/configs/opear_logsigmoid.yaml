@@ -41,4 +41,4 @@ save_freq: 30
 test_freq: 5
 val_before_train: true
 logger: '["console","wandb"]'
-project_name: verl_agent_alfworld
+project_name: opear_alfworld
