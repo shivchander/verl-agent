@@ -46,8 +46,11 @@ def _extend_trainer():
             )
             self.opear_lambda = cfg.get("lambda_coef", 0.5)
             self.opear_alpha = cfg.get("alpha", 0.5)
+            self.opear_loss_type = cfg.get("loss_type", "unbounded")
+            self.opear_beta = cfg.get("loss_beta", 1.0)
             print(f"[O-PEaR] enabled: lambda={self.opear_lambda}, "
-                  f"alpha={self.opear_alpha}, beta={cfg.get('beta', 0.5)}")
+                  f"alpha={self.opear_alpha}, beta={cfg.get('beta', 0.5)}, "
+                  f"loss_type={self.opear_loss_type}, loss_beta={self.opear_beta}")
 
     def _update_actor(self, batch):
         if getattr(self, "opear_enabled", False):
@@ -91,6 +94,8 @@ def _generate_contrastive_data(trainer, batch):
         batch.meta_info["opear_data"] = opear_data
         batch.meta_info["opear_alpha"] = trainer.opear_alpha
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
+        batch.meta_info["opear_loss_type"] = trainer.opear_loss_type
+        batch.meta_info["opear_beta"] = trainer.opear_beta
         n = sum(1 for p in pairs if p is not None)
         print(f"[O-PEaR] {n}/{len(selected)} valid contrastive pairs")
     else:

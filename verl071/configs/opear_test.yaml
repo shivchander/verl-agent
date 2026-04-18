@@ -1,0 +1,12 @@
+# Quick test config — small batch, 2 epochs
+experiment_name: drgrpo_opear_test
+gpus: "4,5,6,7"
+train_batch_size: 4
+val_batch_size: 4
+group_size: 2
+epochs: 2
+save_freq: 50
+val_before_train: false
+logger: '["console"]'
+opear_loss_type: logsigmoid
+opear_loss_beta: 1.0

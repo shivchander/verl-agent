@@ -1,0 +1,4 @@
+# O-PEaR with lambda=0.1 (unbounded loss) — weak regularization ablation
+experiment_name: drgrpo_opear_lambda01_qwen3_4b
+gpus: "0,1,2,3"
+opear_lambda: 0.1

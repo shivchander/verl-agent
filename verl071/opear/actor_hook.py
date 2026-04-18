@@ -27,6 +27,8 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     alpha = data.meta_info.get("opear_alpha", 0.5)
     lam = data.meta_info.get("opear_lambda", 0.5)
+    loss_type = data.meta_info.get("opear_loss_type", "unbounded")
+    beta = data.meta_info.get("opear_beta", 1.0)
     temperature = data.meta_info.get("temperature", 1.0)
     device = next(actor.actor_module.parameters()).device
 
@@ -58,13 +60,15 @@ def opear_accumulate_gradients(actor, data, metrics):
     c_rm = c_mask[:, :c_lp.shape[-1]]
     v_rm = v_mask[:, :v_lp.shape[-1]]
 
-    loss, opear_metrics = compute_opear_loss(c_lp, c_rm, v_lp, v_rm, alpha=alpha)
+    loss, opear_metrics = compute_opear_loss(
+        c_lp, c_rm, v_lp, v_rm, alpha=alpha, loss_type=loss_type, beta=beta)
     scaled = lam * loss
     scaled.backward()
 
     opear_metrics["opear/scaled_loss"] = scaled.detach().item()
     opear_metrics["opear/lambda"] = lam
-    opear_metrics["opear/alpha"] = alpha
+    opear_metrics["opear/loss_type"] = 1.0 if loss_type == "logsigmoid" else 0.0
+    opear_metrics["opear/beta"] = beta
 
     for k, v in opear_metrics.items():
         metrics[k] = metrics.get(k, 0.0) + v

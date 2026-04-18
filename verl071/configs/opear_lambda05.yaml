@@ -1,0 +1,4 @@
+# O-PEaR with lambda=0.5 (unbounded loss) — baseline OPEAR run
+experiment_name: drgrpo_opear_qwen3_4b
+gpus: "4,5,6,7"
+opear_lambda: 0.5

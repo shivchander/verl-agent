@@ -4,16 +4,18 @@ The O-PEaR regularizer encourages the policy to assign higher probability to
 compliant responses (consistent with environment facts) and lower probability
 to violating responses (contradicting facts).
 
-Math:
-    R(theta) = alpha * E[log p(z_c | c)] - (1 - alpha) * E[log p(z_v | c)]
-    L_OPEaR  = -mean(R)
+Two loss variants:
+  - 'unbounded': L = -mean(R)  — original, R grows without limit
+  - 'logsigmoid': L = -mean(log_sigmoid(beta * diff))  — bounded, gradients
+    vanish naturally as the model learns to distinguish pairs (DPO-style)
 
-Minimizing L_OPEaR maximizes compliant log-prob and minimizes violating log-prob.
+Minimizing either loss maximizes compliant log-prob and minimizes violating log-prob.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 
 def compute_opear_loss(
@@ -22,6 +24,8 @@ def compute_opear_loss(
     violating_log_probs: torch.Tensor,  # (N, response_len)
     violating_mask: torch.Tensor,       # (N, response_len)
     alpha: float = 0.5,
+    loss_type: str = "unbounded",
+    beta: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the O-PEaR regularization loss.
 
@@ -39,45 +43,45 @@ def compute_opear_loss(
         violating_mask: Binary mask indicating valid tokens in violating
             responses. Shape (N, response_len).
         alpha: Balance parameter between compliant and violating terms.
-            Default 0.5 (equal weight).
+            Only used for 'unbounded' loss_type. Default 0.5.
+        loss_type: 'unbounded' (original) or 'logsigmoid' (bounded).
+        beta: Temperature for logsigmoid. Higher = saturates faster.
+            Only used for 'logsigmoid' loss_type. Default 1.0.
 
     Returns:
-        loss: Scalar tensor. Minimizing this maximizes compliant probability
-            and minimizes violating probability.
-        metrics: Dict with keys:
-            - opear/loss: the scalar loss value (detached)
-            - opear/compliant_logprob: mean normalized compliant log-prob
-            - opear/violating_logprob: mean normalized violating log-prob
-            - opear/R_mean: mean of the per-sample regularizer R
-            - opear/num_pairs: number of contrastive pairs (N)
+        loss: Scalar tensor.
+        metrics: Dict with diagnostic metrics.
     """
-    # Number of contrastive pairs
     num_pairs = compliant_log_probs.shape[0]
 
     # Per-sequence normalized log-prob: sum(lp * mask) / sum(mask)
-    # Clamp denominator to 1.0 minimum to avoid division by zero
     compliant_lengths = compliant_mask.sum(dim=-1).clamp(min=1.0)
     violating_lengths = violating_mask.sum(dim=-1).clamp(min=1.0)
 
     compliant_norm_lp = (compliant_log_probs * compliant_mask).sum(dim=-1) / compliant_lengths
     violating_norm_lp = (violating_log_probs * violating_mask).sum(dim=-1) / violating_lengths
 
-    # R(theta) = alpha * E[log p(z_c | c)] - (1 - alpha) * E[log p(z_v | c)]
-    R = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
+    # Per-pair logprob gap (length-invariant)
+    diff = compliant_norm_lp - violating_norm_lp  # (N,)
 
-    # L_OPEaR = -mean(R)
-    R_mean = R.mean()
-    loss = -R_mean
+    if loss_type == "logsigmoid":
+        # DPO-style: gradients vanish as gap grows, bounded loss
+        loss = -F.logsigmoid(beta * diff).mean()
+    else:
+        # Original unbounded: R = alpha * compliant - (1-alpha) * violating
+        R = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
+        diff = R / max(alpha, 1.0 - alpha)  # normalize for comparable gap metric
+        loss = -R.mean()
 
     metrics = {
         "opear/loss": loss.detach().item(),
         "opear/compliant_logprob": compliant_norm_lp.mean().detach().item(),
         "opear/violating_logprob": violating_norm_lp.mean().detach().item(),
-        "opear/logprob_gap": (compliant_norm_lp - violating_norm_lp).mean().detach().item(),
-        "opear/R_mean": R_mean.detach().item(),
-        "opear/R_std": R.std().detach().item() if num_pairs > 1 else 0.0,
-        "opear/R_min": R.min().detach().item(),
-        "opear/R_max": R.max().detach().item(),
+        "opear/logprob_gap": diff.mean().detach().item(),
+        "opear/R_mean": diff.mean().detach().item(),
+        "opear/R_std": diff.std().detach().item() if num_pairs > 1 else 0.0,
+        "opear/R_min": diff.min().detach().item(),
+        "opear/R_max": diff.max().detach().item(),
         "opear/num_pairs": num_pairs,
         "opear/compliant_length": compliant_lengths.mean().detach().item(),
         "opear/violating_length": violating_lengths.mean().detach().item(),
