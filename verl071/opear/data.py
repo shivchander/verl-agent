@@ -17,41 +17,94 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def reconstruct_trajectories(batch, tokenizer) -> list[dict]:
-    """Reconstruct per-trajectory data from the flat training batch.
+def select_batch_positions(batch, group_size: int, selection_ratio: float) -> list[int]:
+    """Select batch positions for contrastive pair generation.
 
-    Each row in the batch is one complete multi-turn episode (prompt +
-    concatenated response). Trajectories are identified by the ``index``
-    field in ``non_tensor_batch`` — rows with the same index are different
-    rollouts (group members) of the same prompt.
-
-    We pick one representative row per unique index to build the trajectory
-    dict that the guide model needs.
+    Selects floor(selection_ratio * group_size) rollouts per task group.
+    Only does index math — no decoding, no tokenization.
 
     Args:
-        batch: DataProto with batch["prompts"], batch["responses"],
-            batch["attention_mask"], and non_tensor_batch["index"].
-        tokenizer: HuggingFace tokenizer for decoding.
+        batch: DataProto with non_tensor_batch["uid"].
+        group_size: Number of rollouts per group (rollout.n).
+        selection_ratio: Fraction of each group to select.
 
     Returns:
-        List of trajectory dicts with keys: traj_uid, task_description,
-        facts, turns, turn_indices.
+        List of selected batch position indices.
     """
+    import math
+    import random
+    from collections import defaultdict
+
     uids = batch.non_tensor_batch.get("uid", None)
     if uids is None:
         logger.warning("No 'uid' field in batch.non_tensor_batch")
         return []
 
-    # Group batch positions by uid — pick first occurrence as
-    # representative for each unique prompt.
-    seen: dict[str, int] = {}
+    groups: dict[str, list[int]] = defaultdict(list)
     for i, uid in enumerate(uids):
-        uid_str = str(uid)
-        if uid_str not in seen:
-            seen[uid_str] = i
+        groups[str(uid)].append(i)
+
+    k_per_group = max(1, math.floor(selection_ratio * group_size))
+    selected: list[int] = []
+    for positions in groups.values():
+        k = min(k_per_group, len(positions))
+        selected.extend(random.sample(positions, k))
+
+    return selected
+
+
+def _find_assistant_segments(response_mask: torch.Tensor) -> list[tuple[int, int]]:
+    """Find contiguous segments where response_mask=1 (assistant turns).
+
+    Args:
+        response_mask: 1D tensor, 1 for model-generated tokens, 0 for user/observation.
+
+    Returns:
+        List of (start, end) index pairs within the response portion.
+    """
+    mask = response_mask.cpu().numpy().astype(int)
+    segments = []
+    in_segment = False
+    start = 0
+    for i, v in enumerate(mask):
+        if v == 1 and not in_segment:
+            start = i
+            in_segment = True
+        elif v == 0 and in_segment:
+            segments.append((start, i))
+            in_segment = False
+    if in_segment:
+        segments.append((start, len(mask)))
+    return segments
+
+
+def reconstruct_trajectories(batch, tokenizer, batch_positions: list[int]) -> list[dict]:
+    """Reconstruct per-rollout multi-turn trajectory data for selected positions.
+
+    Uses response_mask to identify individual assistant turns within the
+    concatenated response. Each assistant turn is decoded separately so the
+    guide model can rewrite them individually.
+
+    Args:
+        batch: DataProto with batch["prompts"], batch["responses"],
+            batch["response_mask"], batch["attention_mask"],
+            and non_tensor_batch["uid"].
+        tokenizer: HuggingFace tokenizer for decoding.
+        batch_positions: Which rows in the batch to reconstruct.
+
+    Returns:
+        List of trajectory dicts with keys: traj_uid, group_id,
+        task_description, facts, turns, turn_indices, assistant_segments.
+    """
+    uids = batch.non_tensor_batch.get("uid", None)
+    if uids is None:
+        return []
 
     trajectories: list[dict] = []
-    for uid_str, batch_pos in seen.items():
+    for batch_pos in batch_positions:
+        group_id = str(uids[batch_pos])
+        traj_uid = f"{group_id}_{batch_pos}"
+
         prompt_ids = batch.batch["prompts"][batch_pos]
         attn = batch.batch["attention_mask"][batch_pos]
         prompt_len = prompt_ids.shape[0]
@@ -60,9 +113,26 @@ def reconstruct_trajectories(batch, tokenizer) -> list[dict]:
         observation = tokenizer.decode(valid_ids, skip_special_tokens=True)
 
         response_ids = batch.batch["responses"][batch_pos]
-        resp_len = int(attn[prompt_len:].sum().item())
-        valid_resp = response_ids[:resp_len]
-        response = tokenizer.decode(valid_resp, skip_special_tokens=True)
+        resp_mask = batch.batch["response_mask"][batch_pos]
+
+        # Find assistant turn boundaries using response_mask
+        segments = _find_assistant_segments(resp_mask)
+
+        # Decode each turn separately for the guide
+        turns: list[dict] = [{"role": "observation", "content": observation}]
+        for seg_idx, (seg_start, seg_end) in enumerate(segments):
+            # Decode assistant segment
+            asst_ids = response_ids[seg_start:seg_end]
+            asst_text = tokenizer.decode(asst_ids, skip_special_tokens=True)
+            turns.append({"role": "assistant", "content": asst_text})
+
+            # Decode observation between this assistant turn and the next
+            if seg_idx + 1 < len(segments):
+                next_start = segments[seg_idx + 1][0]
+                obs_ids = response_ids[seg_end:next_start]
+                if len(obs_ids) > 0:
+                    obs_text = tokenizer.decode(obs_ids, skip_special_tokens=True)
+                    turns.append({"role": "observation", "content": obs_text})
 
         facts = ""
         if "facts_str" in batch.non_tensor_batch:
@@ -77,19 +147,14 @@ def reconstruct_trajectories(batch, tokenizer) -> list[dict]:
                 pos + len(marker) : end if end != -1 else None
             ].strip()
 
-        turns = [
-            {"role": "observation", "content": observation},
-            {"role": "assistant", "content": response},
-        ]
-
-        all_positions = [i for i, u in enumerate(uids) if str(u) == uid_str]
-
         trajectories.append({
-            "traj_uid": uid_str,
+            "traj_uid": traj_uid,
+            "group_id": group_id,
             "task_description": task_description or "Complete the task.",
             "facts": facts,
             "turns": turns,
-            "turn_indices": all_positions,
+            "turn_indices": [batch_pos],
+            "assistant_segments": segments,
         })
 
     return trajectories
@@ -110,6 +175,86 @@ def _response_text_from_turn(turn) -> str:
     return str(turn)
 
 
+def _swap_assistant_segments(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+    prompt_len: int,
+    segments: list[tuple[int, int]],
+    rewrite_turns: list,
+    tokenizer,
+    pad_token_id: int,
+) -> Optional[dict]:
+    """Create a contrastive sequence by swapping assistant tokens in-place.
+
+    Keeps the full original sequence (prompt + interleaved observations)
+    identical. Only replaces the tokens in assistant segments with the
+    guide's rewrite tokens, truncating or padding each segment to match
+    the original segment length.
+
+    Args:
+        input_ids: Original full sequence (prompt_len + response_len,).
+        attention_mask: Original attention mask, same shape.
+        response_mask: Original response mask (response_len,).
+            1 for model-generated, 0 for user/observation.
+        prompt_len: Length of the prompt portion.
+        segments: List of (start, end) pairs within the response portion
+            marking assistant turns.
+        rewrite_turns: Guide's rewritten turns (list of dicts or strings),
+            one per assistant segment.
+        tokenizer: For encoding rewrite text.
+        pad_token_id: Token ID used for padding within segments.
+
+    Returns:
+        Dict with input_ids, attention_mask, response_mask tensors,
+        or None if no segments could be matched.
+    """
+    num_turns = min(len(segments), len(rewrite_turns))
+    if num_turns == 0:
+        return None
+
+    new_input_ids = input_ids.clone()
+    new_attn_mask = attention_mask.clone()
+    new_resp_mask = response_mask.clone()
+
+    for t in range(num_turns):
+        seg_start, seg_end = segments[t]
+        seg_len = seg_end - seg_start
+
+        # Tokenize the guide's rewrite for this turn
+        text = _response_text_from_turn(rewrite_turns[t])
+        rewrite_ids = tokenizer.encode(text, add_special_tokens=False)
+
+        # Truncate or pad to match the original segment length
+        actual_len = min(len(rewrite_ids), seg_len)
+        pad_len = seg_len - actual_len
+
+        # Write rewrite tokens into the response portion of input_ids
+        offset = prompt_len + seg_start
+        new_input_ids[offset:offset + actual_len] = torch.tensor(
+            rewrite_ids[:actual_len], dtype=input_ids.dtype
+        )
+        # Pad remainder of segment with pad_token_id
+        if pad_len > 0:
+            new_input_ids[offset + actual_len:offset + seg_len] = pad_token_id
+
+        # Keep attention_mask=1 for the ENTIRE segment (including padding).
+        # Zeroing attention within a sequence creates holes that break causal
+        # attention and unpad_input in flash attention. The pad tokens produce
+        # garbage logits but response_mask=0 ensures they don't affect the loss.
+        new_attn_mask[offset:offset + seg_len] = 1
+
+        # Update response_mask: only compute loss on actual rewrite tokens
+        new_resp_mask[seg_start:seg_start + actual_len] = 1
+        new_resp_mask[seg_start + actual_len:seg_end] = 0
+
+    return {
+        "input_ids": new_input_ids,
+        "attention_mask": new_attn_mask,
+        "response_mask": new_resp_mask,
+    }
+
+
 def tokenize_contrastive_responses(
     trajectories: list[dict],
     contrastive_pairs: list[Optional[dict]],
@@ -117,32 +262,33 @@ def tokenize_contrastive_responses(
     tokenizer,
     max_response_length: int,
 ) -> Optional[dict]:
-    """Tokenize compliant and violating responses into model-ready tensors.
+    """Create contrastive sequences by swapping assistant content in-place.
 
-    For each turn in each selected trajectory, creates new response token
-    sequences from the guide model's rewritten responses. The prompt tokens
-    stay the same; only the response tokens change.
+    For each selected rollout, takes the ORIGINAL full sequence (prompt +
+    multi-turn response with interleaved observations) and replaces only
+    the assistant-generated segments with the guide's rewrites. The
+    observation tokens, prompt, and overall structure stay identical.
+
+    This ensures the contrastive log-probs are computed in the same context
+    as the original rollout — the model sees the full conversation history
+    with only the assistant actions changed.
 
     Args:
-        trajectories: Output of reconstruct_trajectories.
-        contrastive_pairs: Parallel list, each is None or dict with:
-            - "compliant": list of parsed turn dicts ({"turn": N, "raw": "...",
-              "think": "...", "action": "..."}) or plain strings
-            - "violating": same format
-        batch: Original training batch (for prompt token IDs).
+        trajectories: Output of reconstruct_trajectories, each with
+            'turn_indices' and 'assistant_segments'.
+        contrastive_pairs: Parallel list, each None or dict with
+            'compliant' and 'violating' turn lists.
+        batch: Original training batch.
         tokenizer: For encoding guide responses.
-        max_response_length: For padding.
+        max_response_length: For tensor sizing (unused for structure,
+            but kept for API compat).
 
     Returns:
-        Dict with tensors:
-            compliant_input_ids: (M, prompt_len + max_response_length)
-            compliant_attention_mask: (M, prompt_len + max_response_length)
-            compliant_response_mask: (M, max_response_length)
-            violating_input_ids: same shapes
-            violating_attention_mask: same shapes
-            violating_response_mask: same shapes
-        Or None if no valid pairs.
+        Dict with stacked tensors for compliant and violating sequences,
+        or None if no valid pairs.
     """
+    pad_token_id = getattr(tokenizer, "pad_token_id", None) or 0
+
     compliant_entries: list[dict] = []
     violating_entries: list[dict] = []
 
@@ -150,67 +296,32 @@ def tokenize_contrastive_responses(
         if pair is None:
             continue
 
-        turn_indices = traj["turn_indices"]
+        batch_pos = traj["turn_indices"][0]
+        segments = traj["assistant_segments"]
+
+        # Get the original full sequence
+        orig_input_ids = batch.batch["input_ids"][batch_pos]
+        orig_attn_mask = batch.batch["attention_mask"][batch_pos]
+        orig_resp_mask = batch.batch["response_mask"][batch_pos]
+        prompt_len = batch.batch["prompts"][batch_pos].shape[0]
+
         compliant_turns = pair["compliant"]
         violating_turns = pair["violating"]
 
-        # Match turns: we may have fewer guide turns than batch turns
-        num_turns = min(len(turn_indices), len(compliant_turns), len(violating_turns))
+        c_entry = _swap_assistant_segments(
+            orig_input_ids, orig_attn_mask, orig_resp_mask,
+            prompt_len, segments, compliant_turns,
+            tokenizer, pad_token_id,
+        )
+        v_entry = _swap_assistant_segments(
+            orig_input_ids, orig_attn_mask, orig_resp_mask,
+            prompt_len, segments, violating_turns,
+            tokenizer, pad_token_id,
+        )
 
-        for t in range(num_turns):
-            idx = turn_indices[t]
-            prompt_ids = batch.batch["prompts"][idx]  # (prompt_len,)
-            prompt_attn = batch.batch["attention_mask"][idx]
-            prompt_len = prompt_ids.shape[0]
-
-            for turn_data, entries in [
-                (compliant_turns[t], compliant_entries),
-                (violating_turns[t], violating_entries),
-            ]:
-                # Reconstruct the text from parsed dict or use directly
-                text = _response_text_from_turn(turn_data)
-
-                # Tokenize the guide's response
-                resp_ids = tokenizer.encode(text, add_special_tokens=False)
-                resp_ids = resp_ids[:max_response_length]  # truncate
-                resp_len = len(resp_ids)
-
-                # Pad response to max_response_length
-                pad_len = max_response_length - resp_len
-
-                pad_token_id = getattr(tokenizer, "pad_token_id", None)
-                if pad_token_id is None:
-                    pad_token_id = 0
-                padded_resp = resp_ids + [pad_token_id] * pad_len
-
-                # Build full sequence: prompt + response
-                full_ids = torch.cat(
-                    [
-                        prompt_ids,
-                        torch.tensor(padded_resp, dtype=prompt_ids.dtype),
-                    ]
-                )
-                full_attn = torch.cat(
-                    [
-                        prompt_attn[:prompt_len],
-                        torch.ones(resp_len, dtype=prompt_attn.dtype),
-                        torch.zeros(pad_len, dtype=prompt_attn.dtype),
-                    ]
-                )
-                resp_mask = torch.cat(
-                    [
-                        torch.ones(resp_len, dtype=torch.float32),
-                        torch.zeros(pad_len, dtype=torch.float32),
-                    ]
-                )
-
-                entries.append(
-                    {
-                        "input_ids": full_ids,
-                        "attention_mask": full_attn,
-                        "response_mask": resp_mask,
-                    }
-                )
+        if c_entry is not None and v_entry is not None:
+            compliant_entries.append(c_entry)
+            violating_entries.append(v_entry)
 
     if not compliant_entries:
         return None

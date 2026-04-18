@@ -27,7 +27,8 @@ class TestOPEaRLossBasic:
         assert metrics["opear/loss"] == pytest.approx(-1.25, abs=1e-6)
         assert metrics["opear/compliant_logprob"] == pytest.approx(-0.5, abs=1e-6)
         assert metrics["opear/violating_logprob"] == pytest.approx(-3.0, abs=1e-6)
-        assert metrics["opear/R_mean"] == pytest.approx(1.25, abs=1e-6)
+        # logprob_gap = compliant - violating = -0.5 - (-3.0) = 2.5
+        assert metrics["opear/logprob_gap"] == pytest.approx(2.5, abs=1e-6)
         assert metrics["opear/num_pairs"] == 1
 
     def test_batch_of_pairs(self):
@@ -59,7 +60,7 @@ class TestOPEaRLossEqualProbs:
         loss, metrics = compute_opear_loss(lp, mask, lp, mask, alpha=0.5)
 
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
-        assert metrics["opear/R_mean"] == pytest.approx(0.0, abs=1e-6)
+        assert metrics["opear/logprob_gap"] == pytest.approx(0.0, abs=1e-6)
 
     def test_equal_probs_asymmetric_alpha(self):
         """When probs are equal but alpha != 0.5, loss is nonzero
@@ -188,3 +189,109 @@ class TestOPEaRLossAlpha:
 
         # loss = -mean(c_lp) = 0.5
         assert loss.item() == pytest.approx(0.5, abs=1e-6)
+
+
+class TestOPEaRLossLogsigmoid:
+    """Test the logsigmoid loss variant."""
+
+    def test_logsigmoid_positive_gap(self):
+        """When compliant > violating (gap > 0), logsigmoid loss is small."""
+        N, L = 1, 1
+        compliant_lp = torch.full((N, L), -0.5)
+        violating_lp = torch.full((N, L), -3.0)
+        mask = torch.ones(N, L)
+
+        loss, metrics = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="logsigmoid", beta=1.0,
+        )
+
+        # gap = -0.5 - (-3.0) = 2.5
+        # loss = -logsigmoid(1.0 * 2.5) ≈ -log(0.924) ≈ 0.079
+        import torch.nn.functional as F
+        expected = -F.logsigmoid(torch.tensor(2.5)).item()
+        assert loss.item() == pytest.approx(expected, abs=1e-5)
+        assert metrics["opear/logprob_gap"] == pytest.approx(2.5, abs=1e-6)
+
+    def test_logsigmoid_negative_gap(self):
+        """When violating > compliant (gap < 0), logsigmoid loss is large."""
+        N, L = 1, 1
+        compliant_lp = torch.full((N, L), -3.0)
+        violating_lp = torch.full((N, L), -0.5)
+        mask = torch.ones(N, L)
+
+        loss, metrics = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="logsigmoid", beta=1.0,
+        )
+
+        # gap = -3.0 - (-0.5) = -2.5
+        # loss = -logsigmoid(-2.5) ≈ 2.579
+        import torch.nn.functional as F
+        expected = -F.logsigmoid(torch.tensor(-2.5)).item()
+        assert loss.item() == pytest.approx(expected, abs=1e-5)
+        assert loss.item() > 2.0  # large loss for wrong preference
+
+    def test_logsigmoid_beta_scaling(self):
+        """Higher beta saturates faster — loss drops more for same gap."""
+        N, L = 1, 1
+        compliant_lp = torch.full((N, L), -1.0)
+        violating_lp = torch.full((N, L), -2.0)
+        mask = torch.ones(N, L)
+
+        loss_b1, _ = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="logsigmoid", beta=1.0,
+        )
+        loss_b5, _ = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="logsigmoid", beta=5.0,
+        )
+
+        # Higher beta with positive gap → smaller loss (more saturated)
+        assert loss_b5.item() < loss_b1.item()
+
+    def test_logsigmoid_gradient_flow(self):
+        """Gradients flow through logsigmoid and point in correct direction."""
+        N, L = 2, 3
+        compliant_lp = torch.randn(N, L, requires_grad=True)
+        violating_lp = torch.randn(N, L, requires_grad=True)
+        mask = torch.ones(N, L)
+
+        loss, _ = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="logsigmoid", beta=1.0,
+        )
+        loss.backward()
+
+        assert compliant_lp.grad is not None
+        assert violating_lp.grad is not None
+
+    def test_logsigmoid_bounded(self):
+        """Even with extreme gap, loss stays bounded (unlike unbounded)."""
+        N, L = 1, 1
+        compliant_lp = torch.full((N, L), -0.1)
+        violating_lp = torch.full((N, L), -100.0)
+        mask = torch.ones(N, L)
+
+        loss_ls, _ = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="logsigmoid", beta=1.0,
+        )
+        loss_ub, _ = compute_opear_loss(
+            compliant_lp, mask, violating_lp, mask,
+            loss_type="unbounded", alpha=0.5,
+        )
+
+        # logsigmoid should be near 0 (saturated), unbounded should be large
+        assert loss_ls.item() < 0.01
+        assert loss_ub.item() < -40  # large negative
+
+    def test_invalid_loss_type_raises(self):
+        """Invalid loss_type should raise ValueError."""
+        N, L = 1, 1
+        lp = torch.full((N, L), -1.0)
+        mask = torch.ones(N, L)
+
+        with pytest.raises(ValueError, match="Unknown loss_type"):
+            compute_opear_loss(lp, mask, lp, mask, loss_type="invalid")

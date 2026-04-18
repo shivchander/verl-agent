@@ -37,7 +37,7 @@ cmd = [
     "+algorithm.opear.enable=True",
     "+algorithm.opear.lambda_coef=0.5",
     "+algorithm.opear.alpha=0.5",
-    "+algorithm.opear.beta=0.5",
+    "+algorithm.opear.selection_ratio=0.5",
     "+algorithm.opear.guide_model=gpt-5.4-nano",
     # Data (small)
     f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",

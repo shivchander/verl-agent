@@ -28,7 +28,7 @@ def opear_accumulate_gradients(actor, data, metrics):
     alpha = data.meta_info.get("opear_alpha", 0.5)
     lam = data.meta_info.get("opear_lambda", 0.5)
     loss_type = data.meta_info.get("opear_loss_type", "unbounded")
-    beta = data.meta_info.get("opear_beta", 1.0)
+    beta = data.meta_info.get("opear_loss_beta", 1.0)
     temperature = data.meta_info.get("temperature", 1.0)
     device = next(actor.actor_module.parameters()).device
 
@@ -62,13 +62,19 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     loss, opear_metrics = compute_opear_loss(
         c_lp, c_rm, v_lp, v_rm, alpha=alpha, loss_type=loss_type, beta=beta)
-    scaled = lam * loss
+
+    # Scale to match GRPO gradient magnitude. GRPO divides each micro-batch
+    # loss by gradient_accumulation (= ppo_mini_batch_size / micro_batch_size).
+    # OPEAR runs once per mini-batch, so we divide by the same factor.
+    grad_accum = getattr(actor, "gradient_accumulation", 1)
+    scaled = lam * loss / grad_accum
     scaled.backward()
 
     opear_metrics["opear/scaled_loss"] = scaled.detach().item()
     opear_metrics["opear/lambda"] = lam
+    opear_metrics["opear/alpha"] = alpha
     opear_metrics["opear/loss_type"] = 1.0 if loss_type == "logsigmoid" else 0.0
-    opear_metrics["opear/beta"] = beta
+    opear_metrics["opear/loss_beta"] = beta
 
     for k, v in opear_metrics.items():
         metrics[k] = metrics.get(k, 0.0) + v

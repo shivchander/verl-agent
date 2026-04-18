@@ -27,16 +27,19 @@ You will be given:
 and the student's assistant responses.
 3. Privileged ground-truth facts from the environment's PDDL state.
 
-Your job is to rewrite ONLY the assistant responses so that they are \
-CONSISTENT with the privileged facts. Do not alter observations.
+Your job is to rewrite ONLY the assistant responses so that the chosen \
+actions are CONSISTENT with the privileged facts. Do not alter observations.
 
 Rules:
 - Each rewritten response MUST use EXACTLY this format (no extra text):
     <think>YOUR REASONING HERE</think><action>YOUR ACTION HERE</action>
 - The action MUST be chosen from the admissible actions listed in the \
-corresponding observation.
-- Your reasoning in <think> should reflect knowledge that is consistent \
-with the privileged facts.
+corresponding observation. Use the privileged facts to pick the CORRECT action.
+- Your reasoning in <think> must ONLY reference information the agent can \
+observe (the task description, current observation, and admissible actions). \
+Do NOT mention or quote the privileged facts, PDDL state, or any hidden \
+information in the <think> tags. The reasoning should sound natural, as if \
+the agent figured out the correct action from its observations alone.
 - Produce exactly one rewritten response per assistant turn.
 - Label each rewritten response with a [TURN N] marker (1-indexed).
 

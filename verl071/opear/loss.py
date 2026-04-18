@@ -61,27 +61,25 @@ def compute_opear_loss(
     compliant_norm_lp = (compliant_log_probs * compliant_mask).sum(dim=-1) / compliant_lengths
     violating_norm_lp = (violating_log_probs * violating_mask).sum(dim=-1) / violating_lengths
 
-    # Per-pair logprob gap (length-invariant)
-    diff = compliant_norm_lp - violating_norm_lp  # (N,)
+    # Per-pair logprob gap (length-invariant, always raw)
+    gap = compliant_norm_lp - violating_norm_lp  # (N,)
 
     if loss_type == "logsigmoid":
-        # DPO-style: gradients vanish as gap grows, bounded loss
-        loss = -F.logsigmoid(beta * diff).mean()
-    else:
-        # Original unbounded: R = alpha * compliant - (1-alpha) * violating
+        loss = -F.logsigmoid(beta * gap).mean()
+    elif loss_type == "unbounded":
         R = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
-        diff = R / max(alpha, 1.0 - alpha)  # normalize for comparable gap metric
         loss = -R.mean()
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type!r}. Expected 'unbounded' or 'logsigmoid'.")
 
     metrics = {
         "opear/loss": loss.detach().item(),
         "opear/compliant_logprob": compliant_norm_lp.mean().detach().item(),
         "opear/violating_logprob": violating_norm_lp.mean().detach().item(),
-        "opear/logprob_gap": diff.mean().detach().item(),
-        "opear/R_mean": diff.mean().detach().item(),
-        "opear/R_std": diff.std().detach().item() if num_pairs > 1 else 0.0,
-        "opear/R_min": diff.min().detach().item(),
-        "opear/R_max": diff.max().detach().item(),
+        "opear/logprob_gap": gap.mean().detach().item(),
+        "opear/gap_std": gap.std().detach().item() if num_pairs > 1 else 0.0,
+        "opear/gap_min": gap.min().detach().item(),
+        "opear/gap_max": gap.max().detach().item(),
         "opear/num_pairs": num_pairs,
         "opear/compliant_length": compliant_lengths.mean().detach().item(),
         "opear/violating_length": violating_lengths.mean().detach().item(),

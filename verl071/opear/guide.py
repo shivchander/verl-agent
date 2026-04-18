@@ -26,13 +26,11 @@ class OPEaRGuide:
     def __init__(
         self,
         model: str = "gpt-5.4-nano",
-        beta: float = 0.5,
         max_completion_tokens: int = 4096,
         temperature: float = 0.7,
         max_concurrent: int = 32,
     ):
         self.model = model
-        self.beta = beta
         self.max_completion_tokens = max_completion_tokens
         self.temperature = temperature
         self.max_concurrent = max_concurrent
@@ -91,13 +89,6 @@ class OPEaRGuide:
             return None
 
         return {"compliant": compliant_result, "violating": violating_result}
-
-    def select_rollouts(self, traj_uids: list, group_size: int) -> list:
-        k = math.floor(self.beta * group_size)
-        k = min(k, len(traj_uids))
-        if k <= 0:
-            return []
-        return random.sample(traj_uids, k)
 
     def generate_contrastive_batch(self, trajectories: list[dict]) -> list[Optional[dict]]:
         t0 = time.time()

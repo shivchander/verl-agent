@@ -42,15 +42,15 @@ def _extend_trainer():
             cfg = self.config.algorithm.opear
             self.opear_guide = OPEaRGuide(
                 model=cfg.get("guide_model", "gpt-5.4-nano"),
-                beta=cfg.get("beta", 0.5),
             )
+            self.opear_selection_ratio = cfg.get("selection_ratio", 0.5)
             self.opear_lambda = cfg.get("lambda_coef", 0.5)
             self.opear_alpha = cfg.get("alpha", 0.5)
             self.opear_loss_type = cfg.get("loss_type", "unbounded")
-            self.opear_beta = cfg.get("loss_beta", 1.0)
+            self.opear_loss_beta = cfg.get("loss_beta", 1.0)
             print(f"[O-PEaR] enabled: lambda={self.opear_lambda}, "
-                  f"alpha={self.opear_alpha}, beta={cfg.get('beta', 0.5)}, "
-                  f"loss_type={self.opear_loss_type}, loss_beta={self.opear_beta}")
+                  f"alpha={self.opear_alpha}, selection_ratio={self.opear_selection_ratio}, "
+                  f"loss_type={self.opear_loss_type}, loss_beta={self.opear_loss_beta}")
 
     def _update_actor(self, batch):
         if getattr(self, "opear_enabled", False):
@@ -68,21 +68,21 @@ def _extend_trainer():
 
 def _generate_contrastive_data(trainer, batch):
     """Generate contrastive pairs and attach to batch.meta_info."""
-    from verl071.opear.data import reconstruct_trajectories, tokenize_contrastive_responses
+    from verl071.opear.data import select_batch_positions, reconstruct_trajectories, tokenize_contrastive_responses
 
-    trajectories = reconstruct_trajectories(batch, trainer.tokenizer)
-    if not trajectories:
-        print("[O-PEaR] no trajectories reconstructed, skipping")
+    # Select first (cheap index math), then reconstruct only selected (expensive decoding)
+    positions = select_batch_positions(
+        batch,
+        group_size=trainer.config.actor_rollout_ref.rollout.n,
+        selection_ratio=trainer.opear_selection_ratio,
+    )
+    if not positions:
+        print("[O-PEaR] no positions selected, skipping")
         return
 
-    traj_uids = [t["traj_uid"] for t in trajectories]
-    selected_uids = trainer.opear_guide.select_rollouts(
-        traj_uids,
-        trainer.config.actor_rollout_ref.rollout.n,
-    )
-    selected = [t for t in trajectories if t["traj_uid"] in set(selected_uids)]
+    selected = reconstruct_trajectories(batch, trainer.tokenizer, positions)
     if not selected:
-        print("[O-PEaR] no trajectories selected, skipping")
+        print("[O-PEaR] no trajectories reconstructed, skipping")
         return
 
     pairs = trainer.opear_guide.generate_contrastive_batch(selected)
@@ -95,7 +95,7 @@ def _generate_contrastive_data(trainer, batch):
         batch.meta_info["opear_alpha"] = trainer.opear_alpha
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
         batch.meta_info["opear_loss_type"] = trainer.opear_loss_type
-        batch.meta_info["opear_beta"] = trainer.opear_beta
+        batch.meta_info["opear_loss_beta"] = trainer.opear_loss_beta
         n = sum(1 for p in pairs if p is not None)
         print(f"[O-PEaR] {n}/{len(selected)} valid contrastive pairs")
     else:

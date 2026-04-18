@@ -1,7 +1,7 @@
-"""Tests for verl071.opear.guide module.
+"""Tests for verl071.opear.guide module and data.select_batch_positions.
 
 Includes a live API test against GPT-5.4-nano with a 1-turn ALFWorld
-trajectory, plus unit tests for select_rollouts.
+trajectory, plus unit tests for per-group batch position selection.
 """
 
 import sys
@@ -110,43 +110,61 @@ class TestOPEaRGuideLive:
 # Unit tests for select_rollouts
 # ---------------------------------------------------------------------------
 
-class TestSelectRollouts:
-    @pytest.fixture
-    def guide(self):
-        # Use a dummy key -- select_rollouts does not call the API
-        orig_key = os.environ.get("OPENAI_API_KEY")
-        os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key"
-        g = OPEaRGuide(model="gpt-5.4-nano", beta=0.5)
-        yield g
-        # Restore original key
-        if orig_key is not None:
-            os.environ["OPENAI_API_KEY"] = orig_key
-        else:
-            os.environ.pop("OPENAI_API_KEY", None)
+class TestSelectBatchPositions:
+    """Tests for data.select_batch_positions (per-group rollout selection)."""
 
-    def test_basic_selection(self, guide):
-        uids = list(range(10))
-        selected = guide.select_rollouts(uids, group_size=8)
-        # floor(0.5 * 8) = 4
+    def _make_batch(self, uids):
+        """Create a minimal mock batch with the given uid list."""
+        from types import SimpleNamespace
+        return SimpleNamespace(non_tensor_batch={"uid": uids})
+
+    def test_basic_per_group_selection(self):
+        from verl071.opear.data import select_batch_positions
+        # 4 tasks, 3 rollouts each = 12 total
+        uids = ["a", "a", "a", "b", "b", "b", "c", "c", "c", "d", "d", "d"]
+        batch = self._make_batch(uids)
+        selected = select_batch_positions(batch, group_size=3, selection_ratio=0.5)
+        # floor(0.5 * 3) = 1 per group, 4 groups = 4 total
         assert len(selected) == 4
-        assert all(uid in uids for uid in selected)
+        # One from each group
+        groups_hit = {uids[i] for i in selected}
+        assert groups_hit == {"a", "b", "c", "d"}
 
-    def test_no_duplicates(self, guide):
-        uids = list(range(20))
-        selected = guide.select_rollouts(uids, group_size=10)
+    def test_beta_half_group8(self):
+        from verl071.opear.data import select_batch_positions
+        # 16 tasks, 8 rollouts each = 128 total (matches real config)
+        uids = [str(i) for i in range(16) for _ in range(8)]
+        batch = self._make_batch(uids)
+        selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5)
+        # floor(0.5 * 8) = 4 per group, 16 groups = 64 total
+        assert len(selected) == 64
+        assert len(set(selected)) == 64  # no duplicates
+
+    def test_no_duplicates(self):
+        from verl071.opear.data import select_batch_positions
+        uids = ["a"] * 8 + ["b"] * 8
+        batch = self._make_batch(uids)
+        selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5)
         assert len(selected) == len(set(selected))
 
-    def test_fewer_uids_than_needed(self, guide):
-        uids = [0, 1]
-        selected = guide.select_rollouts(uids, group_size=10)
-        # floor(0.5 * 10) = 5, but only 2 available
-        assert len(selected) == 2
+    def test_small_group(self):
+        from verl071.opear.data import select_batch_positions
+        # Group has fewer members than k_per_group
+        uids = ["a", "a", "b", "b"]
+        batch = self._make_batch(uids)
+        selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5)
+        # floor(0.5 * 8) = 4, but each group only has 2
+        assert len(selected) == 4  # 2 from each group
 
-    def test_zero_group_size(self, guide):
-        uids = list(range(5))
-        selected = guide.select_rollouts(uids, group_size=0)
+    def test_empty_batch(self):
+        from verl071.opear.data import select_batch_positions
+        batch = self._make_batch([])
+        selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5)
         assert selected == []
 
-    def test_empty_uids(self, guide):
-        selected = guide.select_rollouts([], group_size=8)
+    def test_no_uid_field(self):
+        from verl071.opear.data import select_batch_positions
+        from types import SimpleNamespace
+        batch = SimpleNamespace(non_tensor_batch={})
+        selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5)
         assert selected == []
