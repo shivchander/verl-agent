@@ -28,6 +28,7 @@ DEFAULTS = {
     "tp": 2,
     "gpu_memory_utilization": 0.5,
     "max_model_len": 18432,
+    "free_cache_engine": False,
     # Actor
     "lr": 1e-6,
     "micro_batch_size_per_gpu": 1,
@@ -119,7 +120,7 @@ def build_cmd(cfg: dict) -> list[str]:
         "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2",
         "actor_rollout_ref.rollout.enable_chunked_prefill=False",
         "actor_rollout_ref.rollout.enforce_eager=False",
-        "actor_rollout_ref.rollout.free_cache_engine=False",
+        f"actor_rollout_ref.rollout.free_cache_engine={cfg['free_cache_engine']}",
         # Validation sampling
         "actor_rollout_ref.rollout.val_kwargs.temperature=0.4",
         "actor_rollout_ref.rollout.val_kwargs.do_sample=True",

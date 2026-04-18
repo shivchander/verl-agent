@@ -43,7 +43,7 @@ def compute_opear_loss(
         violating_mask: Binary mask indicating valid tokens in violating
             responses. Shape (N, response_len).
         alpha: Balance parameter between compliant and violating terms.
-            Only used for 'unbounded' loss_type. Default 0.5.
+            Used in both loss variants. Default 0.5.
         loss_type: 'unbounded' (original) or 'logsigmoid' (bounded).
         beta: Temperature for logsigmoid. Higher = saturates faster.
             Only used for 'logsigmoid' loss_type. Default 1.0.
@@ -65,7 +65,8 @@ def compute_opear_loss(
     gap = compliant_norm_lp - violating_norm_lp  # (N,)
 
     if loss_type == "logsigmoid":
-        loss = -F.logsigmoid(beta * gap).mean()
+        weighted_gap = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
+        loss = -F.logsigmoid(beta * weighted_gap).mean()
     elif loss_type == "unbounded":
         R = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
         loss = -R.mean()
