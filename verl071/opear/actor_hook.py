@@ -70,8 +70,12 @@ def opear_accumulate_gradients(actor, data, metrics):
     # on the same footing. This makes lambda=1 mean "equal gradient magnitude."
     loss_sf = getattr(actor.config, "loss_scale_factor", None)
     if loss_sf is None or loss_sf <= 0:
-        grad_accum = getattr(actor, "gradient_accumulation", 1)
-        loss_sf = grad_accum
+        import logging
+        logging.getLogger(__name__).warning(
+            "loss_scale_factor not found on actor.config — OPEAR gradient scaling "
+            "may be wrong. Falling back to gradient_accumulation."
+        )
+        loss_sf = getattr(actor, "gradient_accumulation", 1)
     # Snapshot grad norm BEFORE opear backward (captures GRPO-only grads)
     grpo_grad_norm = _grad_norm(actor.actor_module)
 
@@ -88,16 +92,19 @@ def opear_accumulate_gradients(actor, data, metrics):
     opear_metrics["opear/grad_norm"] = opear_grad_norm
     opear_metrics["opear/grpo_grad_norm"] = grpo_grad_norm
     opear_metrics["opear/combined_grad_norm"] = combined_grad_norm
-    opear_metrics["opear/lambda"] = lam
-    opear_metrics["opear/alpha"] = alpha
-    opear_metrics["opear/loss_type"] = 1.0 if loss_type == "logsigmoid" else 0.0
-    opear_metrics["opear/loss_beta"] = beta
-    opear_metrics["opear/selection_ratio"] = data.meta_info.get("opear_selection_ratio", 0.5)
     opear_metrics["opear/guide_time_s"] = data.meta_info.get("opear_guide_time_s", 0.0)
     opear_metrics["opear/num_segments"] = data.meta_info.get("opear_num_segments", 0.0)
 
+    # Accumulate per-step metrics (loss, grad norms, etc.)
     for k, v in opear_metrics.items():
         metrics[k] = metrics.get(k, 0.0) + v
+
+    # Set config constants directly (not accumulated)
+    metrics["opear/lambda"] = lam
+    metrics["opear/alpha"] = alpha
+    metrics["opear/loss_type"] = 1.0 if loss_type == "logsigmoid" else 0.0
+    metrics["opear/loss_beta"] = beta
+    metrics["opear/selection_ratio"] = data.meta_info.get("opear_selection_ratio", 0.5)
 
 
 def _grad_norm(module) -> float:
