@@ -8,20 +8,11 @@ O-PEaR is a contrastive regularization method that augments reinforcement learni
 - [Algorithm Overview](#algorithm-overview)
 - [Architecture](#architecture)
 - [Module Reference](#module-reference)
-  - [loss.py — Contrastive Loss](#lossspy--contrastive-loss)
-  - [data.py — Trajectory Reconstruction and Tokenization](#datapy--trajectory-reconstruction-and-tokenization)
-  - [guide.py — Guide Model Client](#guidepy--guide-model-client)
-  - [prompts.py — Prompt Templates and Parsing](#promptspy--prompt-templates-and-parsing)
-  - [actor_hook.py — Gradient Accumulation Hook](#actor_hookpy--gradient-accumulation-hook)
-  - [extensions.py — Trainer Integration](#extensionspy--trainer-integration)
-  - [main_opear.py — Entry Point](#main_opearpy--entry-point)
-  - [run_opear.py — Config-Driven Runner](#run_opearpy--config-driven-runner)
-  - [patches/apply_verl_patches.py — verl Modifications](#patchesapply_verl_patchespy--verl-modifications)
 - [Data Flow](#data-flow)
 - [Multi-Turn Token Structure](#multi-turn-token-structure)
 - [Contrastive Sequence Rebuilding](#contrastive-sequence-rebuilding)
 - [Gradient Scale Matching](#gradient-scale-matching)
-- [Loss Functions](#loss-functions)
+- [Loss Function](#loss-function)
 - [Hyperparameters](#hyperparameters)
 - [WandB Metrics](#wandb-metrics)
 - [Configuration](#configuration)
@@ -55,9 +46,9 @@ At each training step, O-PEaR augments the standard GRPO update:
 5. Reconstruction:    Decode selected rollouts into multi-turn trajectories
 6. Guide generation:  GPT-5.4-nano rewrites each trajectory into compliant + violating versions
 7. Tokenization:      Rebuild full sequences with guide rewrites (prompt + obs preserved)
-8. Forward pass:      Compute log-probs for compliant and violating sequences under the policy
-9. Contrastive loss:  L_opear = -mean(log_sigmoid(beta * (lp_compliant - lp_violating)))
-10. O-PEaR backward:  scaled_loss = lambda * L_opear / loss_scale_factor → ∇_OPEAR accumulated
+8. Micro-batched forward: For each pair, compute log-probs under the policy (1 pair at a time)
+9. Contrastive loss:  L_opear = -mean(log_sigmoid(beta * mean_gap))
+10. O-PEaR backward:  scaled = lambda * L_opear / num_pairs → ∇_OPEAR accumulated
 
 11. Optimizer step:   optimizer.step() uses ∇_GRPO + ∇_OPEAR combined gradients
 ```
@@ -69,7 +60,7 @@ The key insight is that steps 4-10 happen between GRPO's backward pass and the o
 ## Architecture
 
 ```
-run_opear.py (config-driven launcher)
+run_alfworld_opear.py (config-driven launcher)
     │
     ▼
 main_opear.py (OPEaRTaskRunner)
@@ -90,12 +81,14 @@ verl RayPPOTrainer (patched)
     │   │
     │   └── 2. Original _update_actor (GRPO)
     │           │
-    │           ├── GRPO forward + backward
+    │           ├── GRPO forward + backward (16 micro-batches)
     │           ├── opear_accumulate_gradients()    [actor_hook.py]
-    │           │       ├── _forward_micro_batch() (compliant)
-    │           │       ├── _forward_micro_batch() (violating)
-    │           │       ├── compute_opear_loss()   [loss.py]
-    │           │       └── scaled.backward()
+    │           │       ├── for each pair (micro-batched):
+    │           │       │   ├── _forward_micro_batch() (compliant)
+    │           │       │   ├── _forward_micro_batch() (violating)
+    │           │       │   ├── compute_opear_loss()   [loss.py]
+    │           │       │   └── (lam * loss / N).backward()
+    │           │       └── grad norms tracked
     │           └── optimizer.step()
     │
     └── verl dp_actor.py (patched to call actor_hook)
@@ -107,16 +100,12 @@ verl RayPPOTrainer (patched)
 
 ### `loss.py` — Contrastive Loss
 
-**`compute_opear_loss(compliant_log_probs, compliant_mask, violating_log_probs, violating_mask, alpha, loss_type, beta)`**
-
-Computes the O-PEaR regularization loss from per-token log-probabilities.
+**`compute_opear_loss(compliant_log_probs, compliant_mask, violating_log_probs, violating_mask, beta=1.0)`**
 
 - **Inputs**: `(N, response_len)` tensors for compliant/violating log-probs and masks
-- **Normalization**: Per-sequence mean log-prob = `sum(lp * mask) / sum(mask)` (length-invariant)
-- **Gap**: `gap = compliant_norm_lp - violating_norm_lp` (positive = model prefers compliant)
-- **Loss variants**:
-  - `"unbounded"`: `L = -mean(alpha * lp_c - (1-alpha) * lp_v)` — original, R grows without limit
-  - `"logsigmoid"`: `L = -mean(log_sigmoid(beta * gap))` — bounded [0, -log(2)], DPO-style
+- **Normalization**: Per-token mean log-prob = `sum(lp * mask) / sum(mask)`
+- **Gap**: `gap = compliant_mean_lp - violating_mean_lp` (positive = model prefers compliant)
+- **Loss**: `L = -mean(log_sigmoid(beta * gap))` — bounded, DPO-style
 - **Returns**: `(loss_tensor, metrics_dict)`
 
 ### `data.py` — Trajectory Reconstruction and Tokenization
@@ -124,107 +113,58 @@ Computes the O-PEaR regularization loss from per-token log-probabilities.
 **`select_batch_positions(batch, group_size, selection_ratio)`**
 - Per-group selection using `uid` field to identify groups
 - Picks `floor(selection_ratio * group_size)` rollouts per group (not globally)
-- Returns list of batch indices
-
-**`_find_assistant_segments(response_mask)`**
-- Finds contiguous `mask=1` regions in the response portion
-- Returns `[(start, end), ...]` pairs within the response
 
 **`reconstruct_trajectories(batch, tokenizer, batch_positions)`**
 - Decodes selected rollouts into structured multi-turn trajectories
 - Uses `response_mask` segments to separate individual assistant turns
-- Extracts observations between turns, task description from prompt, PDDL facts
-- Returns list of trajectory dicts with `turns`, `assistant_segments`, `facts`, etc.
-
-**`_build_contrastive_sequence(prompt_ids, orig_response_ids, orig_response_mask, segments, rewrite_turns, tokenizer, pad_token_id, max_seq_len)`**
-- Reassembles a full sequence: `[prompt] + [obs1] + [rewrite1] + [obs2] + [rewrite2] + ...`
-- **No truncation** of guide rewrites (unlike the original in-place swap approach)
-- Observations copied verbatim from original rollout
-- Pads to `max_seq_len` for batching
-- Returns dict with `input_ids`, `attention_mask`, `response_mask`
 
 **`tokenize_contrastive_responses(trajectories, contrastive_pairs, batch, tokenizer, max_response_length)`**
-- Orchestrates sequence building for all valid pairs
-- Calls `_build_contrastive_sequence` for each compliant and violating variant
-- Pads all sequences to common length with `pad_and_stack`
-- Returns dict with `{compliant,violating}_{input_ids,attention_mask,response_mask}` tensors
+- Rebuilds full sequences: prompt + original observations + guide rewrites (no truncation)
+- Pads all sequences to common length for batching
 
 ### `guide.py` — Guide Model Client
 
 **`OPEaRGuide(model, max_completion_tokens, temperature, max_concurrent)`**
-- Synchronous OpenAI client (avoids asyncio/uvloop conflicts in Ray workers)
-- Uses `ThreadPoolExecutor` for parallelism
-
-**`generate_pair(turns, task_description, facts)`**
-- Calls guide model twice in parallel (compliant + violating) for a single trajectory
-- Retries up to 3 times per call with exponential backoff
-
-**`generate_contrastive_batch(trajectories)`**
-- Generates pairs for all selected trajectories concurrently (up to `max_concurrent=32`)
-- Returns list of `Optional[dict]` parallel to input trajectories
+- Synchronous OpenAI client using `ThreadPoolExecutor` (avoids asyncio conflicts in Ray)
+- Generates compliant + violating pairs in parallel, retries up to 3 times
 
 ### `prompts.py` — Prompt Templates and Parsing
 
-**System prompts**: `COMPLIANT_SYSTEM` and `VIOLATING_SYSTEM`
-- Compliant: "rewrite so actions are CONSISTENT with privileged facts"
-- Violating: "rewrite so actions sound PLAUSIBLE but CONTRADICT the facts"
-- Critical rule in compliant prompt: reasoning must NOT mention privileged facts (prevents information leak into `<think>` tags)
-
-**`build_guide_prompt(turns, task_description, mode, facts)`**
-- Constructs OpenAI chat messages with system prompt + formatted trajectory + facts
-
-**`parse_guide_response(response_text, expected_turns)`**
-- Parses `[TURN N]` markers from guide output
-- Extracts `<think>...</think>` and `<action>...</action>` from each turn block
-- Raises `ValueError` on malformed output (triggers retry in `_call_guide`)
+- Compliant prompt: rewrite actions to be CONSISTENT with privileged facts
+- Violating prompt: rewrite actions to sound PLAUSIBLE but CONTRADICT facts
+- Critical: compliant reasoning must NOT mention privileged facts (prevents information leak)
 
 ### `actor_hook.py` — Gradient Accumulation Hook
 
 **`opear_accumulate_gradients(actor, data, metrics)`**
 - Called from verl's `dp_actor.py` between GRPO backward and `optimizer.step()`
-- Extracts `opear_data` from `data.meta_info`
-- Runs two forward passes through the actor model (compliant + violating sequences)
-- Computes contrastive loss, scales by `lambda / loss_scale_factor`
-- Calls `scaled.backward()` to accumulate gradients with existing GRPO gradients
-- Tracks gradient norms: GRPO-only, OPEAR-only (approximate), and combined
+- **Micro-batched**: processes one pair at a time (2 sequences) to avoid OOM
+- Each per-pair loss scaled by `lambda / num_pairs` — no `loss_scale_factor`
+- Tracks gradient norms: GRPO-only, O-PEaR-only (approximate), and combined
 
 ### `extensions.py` — Trainer Integration
 
-**`apply()`** (call once in Ray worker)
-- Patches `RayPPOTrainer.__init__` to read O-PEaR config and instantiate `OPEaRGuide`
-- Patches `RayPPOTrainer._update_actor` to call `_generate_contrastive_data` before original GRPO update
-- Idempotent — safe to call multiple times
-
-**`_generate_contrastive_data(trainer, batch)`**
-- Orchestrates the full pipeline: select → reconstruct → guide → tokenize
-- Attaches results to `batch.meta_info` for downstream use by `actor_hook.py`
+**`apply()`** — patches `RayPPOTrainer` to generate contrastive data before each `_update_actor` call. Idempotent.
 
 ### `main_opear.py` — Entry Point
 
-**`OPEaRTaskRunner(TaskRunner)`**
-- Subclasses verl's `TaskRunner` to call `extensions.apply()` inside the Ray worker
-- Uses Hydra config with verl's `ppo_trainer` config schema
+Subclasses verl's `TaskRunner` to call `extensions.apply()` inside the Ray worker.
 
-### `run_opear.py` — Config-Driven Runner
+### `run_alfworld_opear.py` — Config-Driven Runner
 
-- Reads YAML config, merges with defaults, launches training
-- Handles data preprocessing, environment variables, CUDA device assignment
-- Supports `--gpus` override and `--dry-run` mode
+Reads YAML config, merges with defaults, launches training. Hardcoded to ALFWorld (interaction config, reward function). Supports `--gpus` override and `--dry-run`.
 
 ### `patches/apply_verl_patches.py` — verl Modifications
 
-Four patches applied to the installed verl package:
-
-1. **agent_loop.py**: Injects `_trajectory_info` (global_step, rollout_n) into agent kwargs for deterministic game selection
-2. **tool_agent_loop.py**: Passes trajectory info into `interaction_kwargs` for the environment
-3. **dp_actor.py (import)**: Adds `try/except` import of `opear_accumulate_gradients`
-4. **dp_actor.py (call site)**: Calls `opear_accumulate_gradients(self, data, metrics)` between GRPO backward and `optimizer.step()`
+Four patches to the installed verl package:
+1. Inject `_trajectory_info` into agent loop kwargs
+2. Pass trajectory info into `interaction_kwargs`
+3. Import `opear_accumulate_gradients` in `dp_actor.py`
+4. Call it between GRPO backward and `optimizer.step()`
 
 ---
 
 ## Data Flow
-
-### Step-by-step through one training iteration:
 
 ```
 Training batch (DataProto)
@@ -232,38 +172,23 @@ Training batch (DataProto)
 │  batch.non_tensor_batch: {uid, facts_str}
 │
 ├─ [extensions.py] _generate_contrastive_data()
-│   │
-│   ├─ select_batch_positions(batch, group_size=8, selection_ratio=0.5)
-│   │   → selects 4 rollouts per task group (indices into batch)
-│   │
-│   ├─ reconstruct_trajectories(batch, tokenizer, positions)
-│   │   → decodes tokens into structured trajectories:
-│   │     [{traj_uid, group_id, task_description, facts,
-│   │       turns: [{role: "observation"/"assistant", content: "..."}],
-│   │       assistant_segments: [(start, end), ...]}]
-│   │
-│   ├─ guide.generate_contrastive_batch(trajectories)
-│   │   → calls GPT-5.4-nano for each trajectory (parallel)
-│   │   → returns [{compliant: [{think, action}, ...],
-│   │               violating: [{think, action}, ...]}, ...]
-│   │
-│   └─ tokenize_contrastive_responses(trajectories, pairs, batch, tokenizer)
-│       → rebuilds full sequences with guide rewrites
-│       → returns {compliant_input_ids, compliant_attention_mask,
-│                  compliant_response_mask, violating_*, ...}
+│   ├─ select_batch_positions() → indices
+│   ├─ reconstruct_trajectories() → structured turn data
+│   ├─ guide.generate_contrastive_batch() → compliant/violating rewrites
+│   └─ tokenize_contrastive_responses() → token tensors
 │
-├─ [dp_actor.py] Standard GRPO forward/backward
-│   → ∇_GRPO accumulated in model parameters
+├─ [dp_actor.py] GRPO forward/backward (16 micro-batches)
+│   → ∇_GRPO accumulated
 │
 ├─ [actor_hook.py] opear_accumulate_gradients()
-│   ├─ Forward pass: compliant sequences → log_probs_c
-│   ├─ Forward pass: violating sequences → log_probs_v
-│   ├─ compute_opear_loss(lp_c, mask_c, lp_v, mask_v)
-│   ├─ scaled = lambda * loss / loss_scale_factor
-│   └─ scaled.backward()  → ∇_OPEAR accumulated with ∇_GRPO
+│   for each pair i in 1..N:
+│       ├─ forward compliant_i → log_probs_c
+│       ├─ forward violating_i → log_probs_v
+│       ├─ loss_i = -logsigmoid(beta * mean_gap_i)
+│       └─ (lambda * loss_i / N).backward() → ∇_OPEAR accumulated
 │
 └─ [dp_actor.py] optimizer.step()
-    → single update using combined ∇_GRPO + ∇_OPEAR
+    → single update using ∇_GRPO + ∇_OPEAR
 ```
 
 ---
@@ -284,73 +209,56 @@ response_mask:  [1 1 1 ... 1]  [0 0 0 ... 0]  [1 1 1 ... 1]  [0 0 0 ... 0]  [0 0
 - `response_mask = 0`: Environment observations + padding — excluded from loss
 - `attention_mask = 1` for all real tokens (including observations), `0` for padding only
 
-The `_find_assistant_segments()` function identifies the `[start, end)` boundaries of each contiguous `mask=1` region, which correspond to individual assistant turns.
-
 ---
 
 ## Contrastive Sequence Rebuilding
 
-When the guide rewrites assistant turns, the new text may be longer or shorter than the original. Rather than truncating rewrites to fit original segment lengths (which would cut off `<action>` tags), we rebuild the entire response sequence from parts:
+When the guide rewrites assistant turns, the new text may be longer or shorter than the original. We rebuild the entire response from parts (no truncation):
 
 ```
 Original:   [prompt] [asst1_orig (50 tok)] [obs1 (30 tok)] [asst2_orig (40 tok)] [pad]
-                      ↓ guide rewrite        (preserved)     ↓ guide rewrite
 Rebuilt:    [prompt] [asst1_new (70 tok)]  [obs1 (30 tok)] [asst2_new (55 tok)]  [pad]
 ```
 
-Key properties:
-- Prompt tokens: identical to original (unchanged)
-- Observation tokens: copied verbatim from original rollout (unchanged)
-- Assistant tokens: guide's full rewrite (no truncation)
-- Response mask: `1` for rewritten assistant tokens, `0` for observation tokens
-- All sequences padded to common length for batching
+Prompt and observation tokens are preserved verbatim. Only assistant tokens change.
 
 ---
 
 ## Gradient Scale Matching
 
-GRPO and O-PEaR losses must produce gradients of comparable magnitude for `lambda` to have intuitive semantics. The critical issue:
+O-PEaR uses **per-token-mean** log-probs inside logsigmoid, which naturally normalizes by sequence length (~800 tokens). GRPO uses **token-sum** divided by `loss_scale_factor` (15360). These produce per-token gradients of the same order of magnitude (~4-6e-6), so **no additional scaling factor is needed**.
 
-**GRPO path**: Inside verl's `agg_loss()`, the raw policy gradient loss is divided by `loss_scale_factor` (= `max_response_length` = 15360). This happens per micro-batch, so after gradient accumulation across 16 micro-batches, the effective scale is `raw_loss / loss_scale_factor`.
-
-**O-PEaR path**: Runs once per mini-batch (not per micro-batch). Without correction, O-PEaR's raw loss (~0.5) would produce gradients ~20,000x larger than GRPO's (~0.000007).
-
-**Fix**: `scaled = lambda * loss / loss_scale_factor`
-
-This ensures `lambda=1` means "OPEAR gradients roughly equal to GRPO gradients." We divide by `loss_scale_factor` (not `gradient_accumulation`) because O-PEaR runs once per mini-batch, not once per micro-batch.
-
+```python
+# actor_hook.py — no loss_sf division
+scaled = lam * pair_loss / num_pairs
+scaled.backward()
 ```
-GRPO:  raw=0.1  → /15360 → 0.0000065 per mini-batch
-OPEAR: raw=0.5  → *0.5/15360 → 0.0000163 (≈2.5x GRPO with lambda=0.5)
-```
+
+Why this works (per-token gradient comparison):
+- GRPO: `A_t * ratio_t / (loss_sf * grad_accum) ≈ O(1) / (15360 * 16) ≈ 4e-6`
+- O-PEaR: `sigmoid(-gap) * beta / (L * N) ≈ 0.3 * 0.1 / (800 * 64) ≈ 6e-7`
+
+With `lambda=1.0`, O-PEaR gradients are ~2-5x GRPO. Lambda directly controls the relative weight.
+
+**Previous bug**: The code previously divided by `loss_scale_factor` (15360), which over-normalized and made O-PEaR a no-op (grad norm ~1e-7 vs GRPO ~0.2). Combined with alpha=0.5 inside the sigmoid and beta=0.1, the total suppression was ~16,000x.
 
 ---
 
-## Loss Functions
-
-### Unbounded (original)
+## Loss Function
 
 ```
-R = alpha * mean_lp_compliant - (1 - alpha) * mean_lp_violating
-L = -mean(R)
-```
-
-Problem: As training progresses, the gap between compliant and violating log-probs grows without bound. The loss magnitude increases over time, eventually dominating GRPO and collapsing rewards.
-
-### Logsigmoid (recommended)
-
-```
-gap = mean_lp_compliant - mean_lp_violating
+mean_lp_c = sum(lp_c * mask_c) / sum(mask_c)   # per-token mean (frozen lengths)
+mean_lp_v = sum(lp_v * mask_v) / sum(mask_v)
+gap = mean_lp_c - mean_lp_v
 L = -mean(log_sigmoid(beta * gap))
 ```
 
 Properties:
 - **Bounded**: Loss is in `[0, log(2) ≈ 0.693]`
 - **Self-saturating**: As the model learns to distinguish pairs (gap >> 0), gradients vanish naturally
-- **beta controls saturation speed**:
-  - `beta=1.0`: Saturates when gap ≈ 5 (strong gradient signal early)
-  - `beta=0.1`: Saturates when gap ≈ 50 (gentler, longer-lasting signal)
+- **beta** controls saturation speed: higher beta = saturates faster. With beta=0.1 and typical gap ~0.8, the gradient multiplier is `sigmoid(-0.08) ≈ 0.48` (strong signal)
 - **DPO-style**: Same functional form as Direct Preference Optimization
+- **No alpha**: Both compliant and violating terms weighted equally in the gap
 
 ---
 
@@ -358,18 +266,16 @@ Properties:
 
 | Parameter | Config Key | Default | Description |
 |-----------|-----------|---------|-------------|
-| **lambda** | `opear_lambda` / `algorithm.opear.lambda_coef` | 0.5 | Weight of O-PEaR loss relative to GRPO. After gradient scaling, lambda=1 means equal magnitude. |
-| **alpha** | `opear_alpha` / `algorithm.opear.alpha` | 0.5 | Balance between compliant (up-weight) and violating (down-weight) terms. Only used for `unbounded` loss. |
-| **selection_ratio** | `opear_selection_ratio` / `algorithm.opear.selection_ratio` | 0.5 | Fraction of each group to select for contrastive pair generation. `floor(ratio * group_size)` per group. |
-| **loss_type** | `opear_loss_type` / `algorithm.opear.loss_type` | `"unbounded"` | `"unbounded"` or `"logsigmoid"`. Logsigmoid is recommended. |
-| **beta** | `opear_loss_beta` / `algorithm.opear.loss_beta` | 1.0 | Temperature for logsigmoid loss. Lower = gentler saturation. Current experiments use 0.1. |
+| **lambda** | `opear_lambda` / `algorithm.opear.lambda_coef` | 0.5 | Weight of O-PEaR relative to GRPO. At lambda=1.0 with beta=0.1, O-PEaR is ~2-5x GRPO. |
+| **beta** | `opear_beta` / `algorithm.opear.beta` | 1.0 | Temperature for logsigmoid. Controls saturation speed and gradient magnitude. |
+| **selection_ratio** | `opear_selection_ratio` / `algorithm.opear.selection_ratio` | 0.5 | Fraction of each group to select. `floor(ratio * group_size)` per group. |
 | **guide_model** | `opear_guide_model` / `algorithm.opear.guide_model` | `"gpt-5.4-nano"` | OpenAI model for contrastive pair generation. |
 
 ### Recommended starting points
 
-- **Conservative**: `lambda=0.1, beta=0.1, loss_type=logsigmoid` — gentle regularization
-- **Moderate**: `lambda=0.5, beta=0.1, loss_type=logsigmoid` — balanced
-- **Aggressive**: `lambda=1.0, beta=0.1, loss_type=logsigmoid` — strong regularization
+- **Conservative**: `lambda=0.1, beta=0.1` — O-PEaR is ~0.2-0.5x GRPO
+- **Moderate**: `lambda=1.0, beta=0.1` — O-PEaR is ~2-5x GRPO
+- **Strong**: `lambda=1.0, beta=1.0` — O-PEaR is ~19x GRPO
 
 ---
 
@@ -379,10 +285,10 @@ All metrics are logged under the `opear/` prefix:
 
 | Metric | Description |
 |--------|-------------|
-| `opear/loss` | Raw contrastive loss (before scaling) |
-| `opear/scaled_loss` | Loss after `lambda / loss_scale_factor` scaling |
-| `opear/compliant_logprob` | Mean normalized log-prob for compliant sequences |
-| `opear/violating_logprob` | Mean normalized log-prob for violating sequences |
+| `opear/loss` | Raw contrastive loss (before lambda scaling) |
+| `opear/scaled_loss` | Loss after `lambda / num_pairs` scaling |
+| `opear/compliant_logprob` | Mean per-token log-prob for compliant sequences |
+| `opear/violating_logprob` | Mean per-token log-prob for violating sequences |
 | `opear/logprob_gap` | Mean `lp_compliant - lp_violating` (should be positive and growing) |
 | `opear/gap_std` | Standard deviation of the gap across pairs |
 | `opear/gap_min` | Minimum gap in the batch (watch for negative values) |
@@ -395,18 +301,16 @@ All metrics are logged under the `opear/` prefix:
 | `opear/combined_grad_norm` | Combined gradient norm after both GRPO + O-PEaR |
 | `opear/guide_time_s` | Wall-clock time for guide model API calls |
 | `opear/num_segments` | Mean assistant turns per trajectory (multi-turn depth) |
-| `opear/lambda` | Current lambda value (constant) |
-| `opear/alpha` | Current alpha value (constant) |
-| `opear/loss_type` | 1.0 = logsigmoid, 0.0 = unbounded |
-| `opear/loss_beta` | Current beta value (constant) |
-| `opear/selection_ratio` | Current selection ratio (constant) |
+| `opear/lambda` | Current lambda value |
+| `opear/beta` | Current beta value |
+| `opear/selection_ratio` | Current selection ratio |
 
 ### What to watch
 
-- **`opear/logprob_gap`**: Should start near 0 and grow positive. If it stays negative, the model is preferring violating responses.
-- **`opear/loss`**: For logsigmoid, should start near `log(2) ≈ 0.693` and decrease toward 0 as the gap grows.
-- **`opear/grad_norm` vs `opear/grpo_grad_norm`**: If OPEAR grad norm >> GRPO, lambda is too high.
-- **`opear/guide_time_s`**: Typically 2-10s. If >> 30s, guide API may be rate-limited.
+- **`opear/logprob_gap`**: Should start near 0 and grow positive. If negative, the model prefers violating responses.
+- **`opear/loss`**: Should start near `log(2) ≈ 0.693` and decrease toward 0 as the gap grows.
+- **`opear/grad_norm` vs `opear/grpo_grad_norm`**: If O-PEaR >> GRPO, reduce lambda or beta. If O-PEaR ≈ 0, something is wrong.
+- **`opear/guide_time_s`**: Typically 15-40s. If >> 60s, guide API may be rate-limited.
 - **`opear/num_pairs`**: Should be > 0 every step. If 0, guide is failing consistently.
 
 ---
@@ -424,11 +328,9 @@ gpus: "0,1,2,3"
 # O-PEaR config
 opear_enable: true
 opear_lambda: 1.0
-opear_alpha: 0.5
+opear_beta: 1.0
 opear_selection_ratio: 0.5
 opear_guide_model: gpt-5.4-nano
-opear_loss_type: logsigmoid
-opear_loss_beta: 0.1
 
 # Model
 model: Qwen/Qwen3-4B
@@ -463,10 +365,6 @@ logger: '["console","wandb"]'
 project_name: opear_alfworld
 ```
 
-### Hydra overrides
-
-The YAML config is translated to Hydra CLI overrides by `run_opear.py`. O-PEaR config is passed via the `+algorithm.opear.*` namespace (the `+` prefix adds new keys to the Hydra config).
-
 ---
 
 ## Running Experiments
@@ -489,13 +387,13 @@ echo $OPENAI_API_KEY  # or set in .env file
 
 ```bash
 # Single run
-python verl071/run_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml
+python verl071/run_alfworld_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml
 
 # Override GPUs
-python verl071/run_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml --gpus 4,5,6,7
+python verl071/run_alfworld_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml --gpus 4,5,6,7
 
 # Dry run (print command without executing)
-python verl071/run_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml --dry-run
+python verl071/run_alfworld_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml --dry-run
 ```
 
 ### Launch in tmux (production)
@@ -503,21 +401,9 @@ python verl071/run_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml --dry-
 ```bash
 tmux new-session -d -s opear-logsig1 \
   "cd /workspace/home/lab/shiv/verl-agent && source .venv/bin/activate && \
-   python verl071/run_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml \
+   python verl071/run_alfworld_opear.py verl071/configs/opear_logsigmoid_lambda1.yaml \
    2>&1 | tee /tmp/opear-logsig1.log"
 ```
-
-### Environment variables set by runner
-
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `CUDA_VISIBLE_DEVICES` | From config `gpus` | GPU assignment |
-| `PYTHONPATH` | Prepends repo root | Module resolution |
-| `TOKENIZERS_PARALLELISM` | `true` | HuggingFace tokenizer parallelism |
-| `NCCL_DEBUG` | `WARN` | Reduce NCCL log noise |
-| `VLLM_LOGGING_LEVEL` | `WARN` | Reduce vLLM log noise |
-| `TMPDIR` | `/mnt/nvme0n1/tmp` | Avoid filling root `/tmp` |
-| `RAY_TMPDIR` | `/mnt/nvme0n1/tmp` | Ray temp files on NVMe |
 
 ---
 
@@ -526,16 +412,16 @@ tmux new-session -d -s opear-logsig1 \
 ### Unit tests
 
 ```bash
-# All tests
 PYTHONPATH=. pytest verl071/tests/ -v
-
-# Specific modules
-PYTHONPATH=. pytest verl071/tests/test_opear_loss.py -v       # Loss computation
-PYTHONPATH=. pytest verl071/tests/test_opear_guide.py -v      # Guide + selection
-PYTHONPATH=. pytest verl071/tests/test_opear_prompts.py -v    # Prompt building/parsing
-PYTHONPATH=. pytest verl071/tests/test_opear_mock.py -v       # Mock integration
-PYTHONPATH=. pytest verl071/tests/test_opear_data_integration.py -v  # Full data pipeline
 ```
+
+### Gradient scale verification (requires GPU)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python verl071/tests/test_gradient_scale.py
+```
+
+Loads Qwen3-4B, computes actual gradient norms for GRPO-style vs O-PEaR-style losses, and compares magnitudes.
 
 ### End-to-end test (requires GPU + OpenAI API key)
 
@@ -543,32 +429,33 @@ PYTHONPATH=. pytest verl071/tests/test_opear_data_integration.py -v  # Full data
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python verl071/tests/test_opear_e2e.py
 ```
 
-This loads Qwen3-4B on a single GPU, builds a realistic multi-turn batch, calls the real guide model, computes log-probs and contrastive losses, and logs everything to `opear_e2e_results.txt`.
-
 ---
 
 ## Design Decisions and Lessons Learned
 
 ### 1. Logsigmoid over unbounded loss
-The original unbounded loss (`L = -mean(R)`) diverged to -36 by step 123, collapsing rewards. As the gap between compliant and violating log-probs grows, the unbounded loss magnitude increases without limit, eventually dominating GRPO. Logsigmoid is bounded in `[0, log(2)]` and self-saturates — gradients vanish as the model learns to distinguish pairs.
+The original unbounded loss (`L = -mean(R)`) diverged to -36 by step 123, collapsing rewards. Logsigmoid is bounded in `[0, log(2)]` and self-saturates.
 
-### 2. Gradient scale matching via loss_scale_factor
-GRPO's internal `agg_loss()` divides raw loss by `loss_scale_factor` (= `max_response_length` = 15360). Without matching this division, OPEAR with lambda=0.5 produced gradients ~20,000x larger than GRPO. The fix: `scaled = lambda * loss / loss_scale_factor`.
+### 2. No loss_scale_factor for O-PEaR
+O-PEaR uses per-token-mean log-probs which naturally normalize by sequence length (~800). GRPO uses token-sum / loss_sf (15360). Both produce per-token gradients of ~4-6e-6, so no additional scaling is needed. Previously, dividing by loss_sf made O-PEaR a no-op (~1e-7 grad norm vs GRPO's ~0.2).
 
-### 3. Rebuild sequences instead of in-place swap
-The original approach swapped guide rewrites into the exact token positions of the original assistant segments, truncating if the rewrite was longer. This cut off `<action>` tags and corrupted the contrastive signal. The current approach rebuilds the entire response from parts: `[obs1] + [rewrite1] + [obs2] + [rewrite2] + ...`, preserving full guide outputs.
+### 3. Micro-batched forward passes
+O-PEaR processes one contrastive pair at a time (2 sequences) to avoid OOM. GRPO uses micro_batch_size=1, so forwarding all 64 pairs at once would require ~14GB of activation memory beyond the available headroom. Micro-batching reduces this to ~3-4GB per pair.
 
-### 4. Per-group selection (not global)
-The original `select_rollouts` picked `floor(ratio * group_size)` trajectories globally. With 2 groups of 8, it might select 4 from group 1 and 0 from group 2. Now selection is per-group: each task group contributes `floor(ratio * group_size)` trajectories.
+### 4. free_cache_engine=True
+vLLM's KV cache (~37GB per GPU) must be freed during training to make room for FSDP actor + O-PEaR forward passes. The cache is reallocated each rollout phase.
 
-### 5. Preventing privileged information leakage
-The compliant prompt originally said "reasoning should reflect knowledge consistent with privileged facts." The guide interpreted this literally, quoting PDDL facts in `<think>` tags. Fix: "reasoning must ONLY reference observable information, do NOT mention privileged facts." The reasoning should sound natural — as if the agent figured out the correct action from observations alone.
+### 5. Rebuild sequences instead of in-place swap
+The original approach truncated guide rewrites to fit original segment lengths, cutting off `<action>` tags. The current approach rebuilds sequences from parts with no truncation.
 
-### 6. Synchronous guide client (not async)
-Ray workers have their own event loops that conflict with `asyncio.run()` and `uvloop`. Using `ThreadPoolExecutor` instead of `asyncio` avoids these conflicts while still enabling parallel API calls.
+### 6. Per-group selection (not global)
+Each task group contributes `floor(ratio * group_size)` trajectories independently.
 
-### 7. Beta naming disambiguation
-The codebase had two unrelated "beta" parameters: selection fraction and loss temperature. Renamed selection fraction to `selection_ratio` everywhere to eliminate ambiguity.
+### 7. Preventing privileged information leakage
+The compliant prompt explicitly forbids mentioning PDDL facts in `<think>` tags. Reasoning must sound natural, as if the agent figured out the correct action from observations alone.
 
-### 8. Response mask semantics
-`response_mask = 1` means "model-generated token" (include in loss), `response_mask = 0` means "observation or padding" (exclude from loss). `attention_mask` is separate — it controls which tokens the transformer can attend to. Setting `attention_mask = 0` for padding tokens within the sequence would break causal attention; instead, padding tokens keep `attention_mask = 1` but are excluded from loss via `response_mask = 0`.
+### 8. Synchronous guide client (not async)
+Ray workers conflict with `asyncio.run()`. Using `ThreadPoolExecutor` avoids this while still enabling parallel API calls.
+
+### 9. Beta controls both saturation and gradient magnitude
+With per-token-mean gap ~0.8 and beta=0.1: `sigmoid(-0.08) ≈ 0.48` (strong signal). With beta=1.0: `sigmoid(-0.8) ≈ 0.31` (still strong). With beta=10: `sigmoid(-8) ≈ 0.0003` (saturated). Beta also linearly scales the gradient, so reducing beta from 1.0 to 0.1 reduces O-PEaR's contribution by ~10x.
