@@ -1,0 +1,6 @@
+interaction:
+  - name: webshop
+    class_name: webshop_interaction.WebShopInteraction
+    config:
+      max_steps: 15
+      history_length: 2
