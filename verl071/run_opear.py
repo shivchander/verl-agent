@@ -28,7 +28,7 @@ DEFAULTS = {
     "tp": 2,
     "gpu_memory_utilization": 0.5,
     "max_model_len": 18432,
-    "free_cache_engine": False,
+    "free_cache_engine": True,
     # Actor
     "lr": 1e-6,
     "micro_batch_size_per_gpu": 1,
@@ -38,11 +38,9 @@ DEFAULTS = {
     # O-PEaR
     "opear_enable": True,
     "opear_lambda": 0.5,
-    "opear_alpha": 0.5,
+    "opear_beta": 1.0,
     "opear_selection_ratio": 0.5,
     "opear_guide_model": "gpt-5.4-nano",
-    "opear_loss_type": "unbounded",
-    "opear_loss_beta": 0.1,
     # Agent loop
     "max_user_turns": 50,
     # Trainer
@@ -81,11 +79,9 @@ def build_cmd(cfg: dict) -> list[str]:
         # O-PEaR
         f"+algorithm.opear.enable={cfg['opear_enable']}",
         f"+algorithm.opear.lambda_coef={cfg['opear_lambda']}",
-        f"+algorithm.opear.alpha={cfg['opear_alpha']}",
+        f"+algorithm.opear.beta={cfg['opear_beta']}",
         f"+algorithm.opear.selection_ratio={cfg['opear_selection_ratio']}",
         f"+algorithm.opear.guide_model={cfg['opear_guide_model']}",
-        f"+algorithm.opear.loss_type={cfg['opear_loss_type']}",
-        f"+algorithm.opear.loss_beta={cfg['opear_loss_beta']}",
         # Data
         f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",
         f"data.val_files={os.path.expanduser('~/data/verl-agent/text/test.parquet')}",
@@ -185,8 +181,7 @@ def main():
 
     print(f"Launching O-PEaR training: {cfg['experiment_name']}")
     print(f"  Model: {cfg['model']} | GPUs: {cfg['gpus']} | TP={cfg['tp']}")
-    print(f"  O-PEaR: lambda={cfg['opear_lambda']}, loss={cfg['opear_loss_type']}, "
-          f"beta={cfg['opear_loss_beta']}, guide={cfg['opear_guide_model']}")
+    print(f"  O-PEaR: lambda={cfg['opear_lambda']}, guide={cfg['opear_guide_model']}")
     print(f"  Batch: {cfg['train_batch_size']} x {cfg['group_size']} = "
           f"{cfg['train_batch_size'] * cfg['group_size']} rollouts/step")
     print(f"  Epochs: {cfg['epochs']} | Save: every {cfg['save_freq']} steps")

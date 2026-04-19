@@ -45,12 +45,9 @@ def _extend_trainer():
             )
             self.opear_selection_ratio = cfg.get("selection_ratio", 0.5)
             self.opear_lambda = cfg.get("lambda_coef", 0.5)
-            self.opear_alpha = cfg.get("alpha", 0.5)
-            self.opear_loss_type = cfg.get("loss_type", "unbounded")
-            self.opear_loss_beta = cfg.get("loss_beta", 1.0)
+            self.opear_beta = cfg.get("beta", 1.0)
             print(f"[O-PEaR] enabled: lambda={self.opear_lambda}, "
-                  f"alpha={self.opear_alpha}, selection_ratio={self.opear_selection_ratio}, "
-                  f"loss_type={self.opear_loss_type}, loss_beta={self.opear_loss_beta}")
+                  f"beta={self.opear_beta}, selection_ratio={self.opear_selection_ratio}")
 
     def _update_actor(self, batch):
         if getattr(self, "opear_enabled", False):
@@ -96,10 +93,8 @@ def _generate_contrastive_data(trainer, batch):
     )
     if opear_data is not None:
         batch.meta_info["opear_data"] = opear_data
-        batch.meta_info["opear_alpha"] = trainer.opear_alpha
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
-        batch.meta_info["opear_loss_type"] = trainer.opear_loss_type
-        batch.meta_info["opear_loss_beta"] = trainer.opear_loss_beta
+        batch.meta_info["opear_beta"] = trainer.opear_beta
         batch.meta_info["opear_selection_ratio"] = trainer.opear_selection_ratio
         batch.meta_info["opear_guide_time_s"] = guide_time
         # Mean assistant segments per trajectory (how multi-turn the rollouts are)

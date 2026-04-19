@@ -7,6 +7,10 @@ backward(), accumulating gradients with the existing GRPO gradients.
 Uses micro-batching (one pair at a time) to avoid OOM — GRPO processes
 sequences with micro_batch_size=1, so forwarding all N contrastive pairs
 at once would exceed GPU memory.
+
+No loss_scale_factor division: O-PEaR uses per-token-mean log-probs which
+naturally normalizes by sequence length (~800), matching GRPO's token-sum /
+loss_sf (~15360) convention at the per-token gradient level.
 """
 
 import torch
@@ -22,7 +26,7 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     Args:
         actor: DataParallelPPOActor instance (has _forward_micro_batch, actor_module)
-        data: DataProto with meta_info containing opear_data, opear_alpha, opear_lambda
+        data: DataProto with meta_info containing opear_data, opear_lambda
         metrics: dict to update with O-PEaR metrics
     """
     if not hasattr(data, "meta_info"):
@@ -33,10 +37,8 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     from verl.utils.model import compute_position_id_with_mask
 
-    alpha = data.meta_info.get("opear_alpha", 0.5)
     lam = data.meta_info.get("opear_lambda", 0.5)
-    loss_type = data.meta_info.get("opear_loss_type", "unbounded")
-    beta = data.meta_info.get("opear_loss_beta", 1.0)
+    beta = data.meta_info.get("opear_beta", 1.0)
     temperature = data.meta_info.get("temperature", 1.0)
     device = next(actor.actor_module.parameters()).device
 
@@ -50,20 +52,6 @@ def opear_accumulate_gradients(actor, data, metrics):
     num_pairs = c_ids.shape[0]
     resp_len = c_mask.shape[-1]
 
-    # Scale to match GRPO gradient magnitude. GRPO's agg_loss divides by
-    # loss_scale_factor (a constant normalizer, typically = max_response_length).
-    # OPEAR runs once per mini-batch (not per micro-batch), so we only need
-    # the loss_scale_factor -- NOT gradient_accumulation -- to put both losses
-    # on the same footing. This makes lambda=1 mean "equal gradient magnitude."
-    loss_sf = getattr(actor.config, "loss_scale_factor", None)
-    if loss_sf is None or loss_sf <= 0:
-        import logging
-        logging.getLogger(__name__).warning(
-            "loss_scale_factor not found on actor.config -- OPEAR gradient scaling "
-            "may be wrong. Falling back to gradient_accumulation."
-        )
-        loss_sf = getattr(actor, "gradient_accumulation", 1)
-
     # Snapshot grad norm BEFORE any O-PEaR backward (captures GRPO-only grads)
     grpo_grad_norm = _grad_norm(actor.actor_module)
 
@@ -75,7 +63,6 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     # --- Micro-batched loop: one pair at a time ---
     for i in range(num_pairs):
-        # Slice out the i-th pair (keep batch dim via [i:i+1])
         ci_ids = c_ids[i : i + 1]
         ci_attn = c_attn[i : i + 1]
         ci_mask = c_mask[i : i + 1]
@@ -112,40 +99,35 @@ def opear_accumulate_gradients(actor, data, metrics):
         ci_rm = ci_mask[:, : c_lp.shape[-1]]
         vi_rm = vi_mask[:, : v_lp.shape[-1]]
 
-        # compute_opear_loss with N=1 returns the single-pair loss (mean is a
-        # no-op for a single element). We scale by 1/num_pairs so that the
-        # sum of backward passes yields grad(mean_loss).
         pair_loss, pair_metrics = compute_opear_loss(
-            c_lp, ci_rm, v_lp, vi_rm, alpha=alpha, loss_type=loss_type, beta=beta
+            c_lp, ci_rm, v_lp, vi_rm, beta=beta
         )
 
-        scaled = lam * pair_loss / (loss_sf * num_pairs)
+        # No loss_sf: per-token-mean already normalizes by sequence length,
+        # matching GRPO's per-token gradient scale. Lambda controls the
+        # relative weight directly.
+        scaled = lam * pair_loss / num_pairs
         scaled.backward()
 
         total_loss += pair_loss.detach().item()
         total_scaled_loss += scaled.detach().item()
 
-        # Accumulate per-pair metrics for later averaging
         for k, v in pair_metrics.items():
             agg_metrics[k] = agg_metrics.get(k, 0.0) + v
 
-        # Track individual gap values for proper min/max/std
         gap_values.append(pair_metrics.get("opear/logprob_gap", 0.0))
 
     # Grad norm AFTER all O-PEaR backwards (captures GRPO + OPEAR combined)
     combined_grad_norm = _grad_norm(actor.actor_module)
-    # OPEAR contribution ~ combined - grpo (approximate, not exact due to direction)
     opear_grad_norm = abs(combined_grad_norm - grpo_grad_norm)
 
-    # Build final metrics: average per-pair values, keep num_pairs as total.
-    # gap_min/gap_max/gap_std are recomputed from collected per-pair gaps
-    # since N=1 calls can't compute meaningful min/max/std individually.
+    # Build final metrics: average per-pair values
     opear_metrics = {}
     for k, v in agg_metrics.items():
         if k == "opear/num_pairs":
             opear_metrics[k] = num_pairs
         elif k in ("opear/gap_std", "opear/gap_min", "opear/gap_max"):
-            continue  # handled below from gap_values
+            continue
         else:
             opear_metrics[k] = v / num_pairs
 
@@ -154,31 +136,20 @@ def opear_accumulate_gradients(actor, data, metrics):
         opear_metrics["opear/gap_min"] = gap_t.min().item()
         opear_metrics["opear/gap_max"] = gap_t.max().item()
         opear_metrics["opear/gap_std"] = gap_t.std().item() if num_pairs > 1 else 0.0
-    else:
-        opear_metrics["opear/gap_min"] = 0.0
-        opear_metrics["opear/gap_max"] = 0.0
-        opear_metrics["opear/gap_std"] = 0.0
 
-    # Override loss with the proper mean (not the per-pair average of
-    # compute_opear_loss which is the same thing for N=1, but be explicit)
     opear_metrics["opear/loss"] = total_loss / num_pairs
     opear_metrics["opear/scaled_loss"] = total_scaled_loss
-    opear_metrics["opear/loss_scale_factor"] = float(loss_sf)
     opear_metrics["opear/grad_norm"] = opear_grad_norm
     opear_metrics["opear/grpo_grad_norm"] = grpo_grad_norm
     opear_metrics["opear/combined_grad_norm"] = combined_grad_norm
     opear_metrics["opear/guide_time_s"] = data.meta_info.get("opear_guide_time_s", 0.0)
     opear_metrics["opear/num_segments"] = data.meta_info.get("opear_num_segments", 0.0)
 
-    # Accumulate per-step metrics (loss, grad norms, etc.)
     for k, v in opear_metrics.items():
         metrics[k] = metrics.get(k, 0.0) + v
 
-    # Set config constants directly (not accumulated)
     metrics["opear/lambda"] = lam
-    metrics["opear/alpha"] = alpha
-    metrics["opear/loss_type"] = 1.0 if loss_type == "logsigmoid" else 0.0
-    metrics["opear/loss_beta"] = beta
+    metrics["opear/beta"] = beta
     metrics["opear/selection_ratio"] = data.meta_info.get("opear_selection_ratio", 0.5)
 
 

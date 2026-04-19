@@ -4,12 +4,11 @@ The O-PEaR regularizer encourages the policy to assign higher probability to
 compliant responses (consistent with environment facts) and lower probability
 to violating responses (contradicting facts).
 
-Two loss variants:
-  - 'unbounded': L = -mean(R)  — original, R grows without limit
-  - 'logsigmoid': L = -mean(log_sigmoid(beta * diff))  — bounded, gradients
-    vanish naturally as the model learns to distinguish pairs (DPO-style)
+Loss: L = -mean(log_sigmoid(beta * mean_gap))
 
-Minimizing either loss maximizes compliant log-prob and minimizes violating log-prob.
+Uses per-token-mean log-probs to keep the logsigmoid in its active range.
+Gradient magnitude matching with GRPO is handled by the scaling in
+actor_hook.py (no loss_scale_factor needed).
 """
 
 from __future__ import annotations
@@ -23,15 +22,9 @@ def compute_opear_loss(
     compliant_mask: torch.Tensor,       # (N, response_len)
     violating_log_probs: torch.Tensor,  # (N, response_len)
     violating_mask: torch.Tensor,       # (N, response_len)
-    alpha: float = 0.5,
-    loss_type: str = "unbounded",
     beta: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the O-PEaR regularization loss.
-
-    Per-sequence normalized log-prob is computed as:
-        sum(log_prob * mask) / sum(mask)
-    with the denominator clamped to avoid division by zero.
 
     Args:
         compliant_log_probs: Per-token log-probabilities for compliant
@@ -42,11 +35,7 @@ def compute_opear_loss(
             (fact-contradicting) responses. Shape (N, response_len).
         violating_mask: Binary mask indicating valid tokens in violating
             responses. Shape (N, response_len).
-        alpha: Balance parameter between compliant and violating terms.
-            Used in both loss variants. Default 0.5.
-        loss_type: 'unbounded' (original) or 'logsigmoid' (bounded).
-        beta: Temperature for logsigmoid. Higher = saturates faster.
-            Only used for 'logsigmoid' loss_type. Default 1.0.
+        beta: Temperature controlling saturation speed. Default 1.0.
 
     Returns:
         loss: Scalar tensor.
@@ -54,29 +43,22 @@ def compute_opear_loss(
     """
     num_pairs = compliant_log_probs.shape[0]
 
-    # Per-sequence normalized log-prob: sum(lp * mask) / sum(mask)
+    # Per-sequence length-normalized log-prob
     compliant_lengths = compliant_mask.sum(dim=-1).clamp(min=1.0)
     violating_lengths = violating_mask.sum(dim=-1).clamp(min=1.0)
 
-    compliant_norm_lp = (compliant_log_probs * compliant_mask).sum(dim=-1) / compliant_lengths
-    violating_norm_lp = (violating_log_probs * violating_mask).sum(dim=-1) / violating_lengths
+    compliant_mean_lp = (compliant_log_probs * compliant_mask).sum(dim=-1) / compliant_lengths
+    violating_mean_lp = (violating_log_probs * violating_mask).sum(dim=-1) / violating_lengths
 
-    # Per-pair logprob gap (length-invariant, always raw)
-    gap = compliant_norm_lp - violating_norm_lp  # (N,)
+    # Per-token-mean gap (keeps logsigmoid in active range ~[-10, 10])
+    gap = compliant_mean_lp - violating_mean_lp  # (N,)
 
-    if loss_type == "logsigmoid":
-        weighted_gap = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
-        loss = -F.logsigmoid(beta * weighted_gap).mean()
-    elif loss_type == "unbounded":
-        R = alpha * compliant_norm_lp - (1.0 - alpha) * violating_norm_lp
-        loss = -R.mean()
-    else:
-        raise ValueError(f"Unknown loss_type: {loss_type!r}. Expected 'unbounded' or 'logsigmoid'.")
+    loss = -F.logsigmoid(beta * gap).mean()
 
     metrics = {
         "opear/loss": loss.detach().item(),
-        "opear/compliant_logprob": compliant_norm_lp.mean().detach().item(),
-        "opear/violating_logprob": violating_norm_lp.mean().detach().item(),
+        "opear/compliant_logprob": compliant_mean_lp.mean().detach().item(),
+        "opear/violating_logprob": violating_mean_lp.mean().detach().item(),
         "opear/logprob_gap": gap.mean().detach().item(),
         "opear/gap_std": gap.std().detach().item() if num_pairs > 1 else 0.0,
         "opear/gap_min": gap.min().detach().item(),
