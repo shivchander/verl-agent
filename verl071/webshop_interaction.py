@@ -151,7 +151,7 @@ def format_goal_facts(goal: dict) -> str:
     # Price limit (omit if >= 1000000, which means no constraint)
     price_upper = goal.get("price_upper", 1000000)
     if price_upper < 1000000:
-        lines.append(f"Price limit: ${price_upper}")
+        lines.append(f"Price limit: ${price_upper:.2f}")
 
     # Best search query
     query = goal.get("query", "")
