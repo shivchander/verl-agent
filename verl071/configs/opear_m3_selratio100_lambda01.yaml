@@ -1,0 +1,44 @@
+# O-PEaR: margin=3, lambda=0.1, selection_ratio=1.0 (all failed rollouts)
+# Exp 5: Selection ratio sweep — full failed-only selection
+experiment_name: drgrpo_opear_m3_sr100_lambda01_qwen3_4b
+gpus: "4,5,6,7"
+
+# O-PEaR config
+opear_enable: true
+opear_lambda: 0.1
+opear_beta: 0.1
+opear_margin: 3
+opear_selection_ratio: 1.0
+opear_guide_model: gpt-5.4-nano
+
+# Model
+model: Qwen/Qwen3-4B
+tp: 2
+gpu_memory_utilization: 0.5
+max_model_len: 18432
+
+# Data
+group_size: 8
+train_batch_size: 16
+val_batch_size: 134
+max_prompt_length: 2048
+max_response_length: 15360
+seed: 42
+
+# Actor
+lr: 1.0e-6
+loss_agg_mode: seq-mean-token-sum-norm
+
+# Algorithm
+gamma: 0.95
+
+# Agent loop
+max_user_turns: 50
+
+# Trainer
+epochs: 250
+save_freq: 30
+test_freq: 5
+val_before_train: true
+logger: '["console","wandb"]'
+project_name: opear_alfworld

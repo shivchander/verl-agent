@@ -4,12 +4,11 @@ The O-PEaR regularizer encourages the policy to assign higher probability to
 compliant responses (consistent with environment facts) and lower probability
 to violating responses (contradicting facts).
 
-Loss: L = -mean(log_sigmoid(beta * mean_gap - margin))
+Loss: L = -mean(log_sigmoid(beta * (mean_gap - margin)))
 
-The margin shifts the saturation point: the model must push the gap past
-margin/beta before gradients decay. This prevents the near-zero gradient
-problem observed when the gap saturates (e.g., gap=58 with beta=0.1 gave
-gradient multiplier 0.003 without margin, vs 0.07 with margin=3).
+The margin is the target gap: gradients are strong when gap < margin,
+half-strength at gap = margin, and decay when gap > margin. Beta controls
+the sharpness of this transition.
 
 Uses per-token-mean log-probs to keep the logsigmoid in its active range.
 Gradient magnitude matching with GRPO is handled by the scaling in
@@ -42,8 +41,8 @@ def compute_opear_loss(
         violating_mask: Binary mask indicating valid tokens in violating
             responses. Shape (N, response_len).
         beta: Temperature controlling saturation speed. Default 1.0.
-        margin: Shifts the saturation point. Gradients stay strong until
-            gap > margin/beta. Default 0.0 (no margin, backward compat).
+        margin: Target gap. Gradients are strong when gap < margin, decay
+            when gap > margin. Default 0.0 (no margin, backward compat).
 
     Returns:
         loss: Scalar tensor.
@@ -61,7 +60,7 @@ def compute_opear_loss(
     # Per-token-mean gap (keeps logsigmoid in active range ~[-10, 10])
     gap = compliant_mean_lp - violating_mean_lp  # (N,)
 
-    loss = -F.logsigmoid(beta * gap - margin).mean()
+    loss = -F.logsigmoid(beta * (gap - margin)).mean()
 
     metrics = {
         "opear/loss": loss.detach().item(),
