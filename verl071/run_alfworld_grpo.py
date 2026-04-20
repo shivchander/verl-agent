@@ -1,0 +1,126 @@
+"""Run ALFWorld standard GRPO training via verl 0.7.1.
+
+Baseline comparison for Dr. GRPO:
+  - Standard GRPO with KL loss + reference model
+  - Same setup otherwise (prompts, reward, game cycling, grouping)
+"""
+import os
+import subprocess
+import sys
+
+GROUP_SIZE = 8
+TRAIN_DATA_SIZE = 16
+VAL_DATA_SIZE = 134
+
+# Prepare data
+print("Preparing data...")
+subprocess.run(
+    [sys.executable, "-m", "examples.data_preprocess.prepare",
+     "--mode", "text",
+     "--train_data_size", str(TRAIN_DATA_SIZE),
+     "--val_data_size", str(VAL_DATA_SIZE)],
+    env={**os.environ, "PYTHONPATH": os.getcwd()},
+    check=True,
+)
+
+INTERACTION_CONFIG = os.path.join(os.getcwd(), "alfworld_interaction_config.yaml")
+REWARD_FN = os.path.join(os.getcwd(), "alfworld_reward.py")
+
+cmd = [
+    sys.executable, "-m", "verl.trainer.main_ppo",
+    # Algorithm — standard GRPO with KL
+    "algorithm.adv_estimator=grpo",
+    "algorithm.use_kl_in_reward=False",
+    "algorithm.norm_adv_by_std_in_grpo=True",
+    "algorithm.gamma=0.95",
+    # Data
+    f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",
+    f"data.val_files={os.path.expanduser('~/data/verl-agent/text/test.parquet')}",
+    f"data.train_batch_size={TRAIN_DATA_SIZE}",
+    f"data.val_batch_size={VAL_DATA_SIZE}",
+    "data.max_prompt_length=2048",
+    "data.max_response_length=15360",
+    "data.filter_overlong_prompts=True",
+    "data.truncation=error",
+    "data.return_raw_chat=True",
+    "data.seed=42",
+    # Model
+    "actor_rollout_ref.model.path=Qwen/Qwen3-4B",
+    "actor_rollout_ref.model.use_remove_padding=True",
+    "actor_rollout_ref.model.enable_gradient_checkpointing=True",
+    # Actor — standard GRPO: KL loss enabled
+    "actor_rollout_ref.actor.optim.lr=1e-6",
+    f"actor_rollout_ref.actor.ppo_mini_batch_size={TRAIN_DATA_SIZE}",
+    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
+    "actor_rollout_ref.actor.use_kl_loss=True",
+    "actor_rollout_ref.actor.kl_loss_coef=0.01",
+    "actor_rollout_ref.actor.kl_loss_type=low_var_kl",
+    "actor_rollout_ref.actor.entropy_coeff=0",
+    "actor_rollout_ref.actor.fsdp_config.param_offload=False",
+    "actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+    # Rollout (vLLM) — TP=2
+    "actor_rollout_ref.rollout.name=vllm",
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.4",
+    "actor_rollout_ref.rollout.max_model_len=18432",
+    "actor_rollout_ref.rollout.load_format=safetensors",
+    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2",
+    "actor_rollout_ref.rollout.enable_chunked_prefill=False",
+    "actor_rollout_ref.rollout.enforce_eager=False",
+    "actor_rollout_ref.rollout.free_cache_engine=False",
+    # Validation sampling
+    "actor_rollout_ref.rollout.val_kwargs.temperature=0.4",
+    "actor_rollout_ref.rollout.val_kwargs.do_sample=True",
+    # Agent loop — tool_agent with ALFWorld interaction
+    "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent",
+    f"actor_rollout_ref.rollout.multi_turn.interaction_config_path={INTERACTION_CONFIG}",
+    "actor_rollout_ref.rollout.multi_turn.max_user_turns=50",
+    # Group size
+    f"actor_rollout_ref.rollout.n={GROUP_SIZE}",
+    # Ref model — enabled for standard GRPO (offloaded to save memory)
+    "actor_rollout_ref.ref.fsdp_config.param_offload=True",
+    "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2",
+    # Reward
+    f"reward.custom_reward_function.path={REWARD_FN}",
+    "reward.custom_reward_function.name=compute_score",
+    # Trainer
+    "trainer.critic_warmup=0",
+    "trainer.n_gpus_per_node=4",
+    "trainer.nnodes=1",
+    "trainer.total_epochs=250",
+    "trainer.save_freq=50",
+    "trainer.test_freq=5",
+    "trainer.val_before_train=True",
+    'trainer.logger=["console"]',
+    "trainer.project_name=verl_agent_alfworld",
+    "trainer.experiment_name=grpo_kl_qwen3_4b",
+]
+
+env = os.environ.copy()
+env["PYTHONPATH"] = os.getcwd() + ":" + env.get("PYTHONPATH", "")
+env["TOKENIZERS_PARALLELISM"] = "true"
+env["NCCL_DEBUG"] = "WARN"
+env["VLLM_LOGGING_LEVEL"] = "WARN"
+env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+
+print(f"Launching verl ALFWorld GRPO+KL baseline")
+print(f"  Model: Qwen3-4B | GPUs: {env['CUDA_VISIBLE_DEVICES']} | TP=2")
+print(f"  Standard GRPO: KL loss (coef=0.01) + ref model (offloaded)")
+print(f"  Batch: {TRAIN_DATA_SIZE} x {GROUP_SIZE} group = {TRAIN_DATA_SIZE * GROUP_SIZE} rollouts/step")
+print(f"  Epochs: 250 | Response budget: 15360 | Max steps: 50 | gamma: 0.95")
+
+proc = subprocess.Popen(
+    cmd,
+    env=env,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
+)
+
+for line in proc.stdout:
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+proc.wait()
+print(f"\nExited with code: {proc.returncode}")
