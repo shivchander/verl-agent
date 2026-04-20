@@ -22,10 +22,13 @@ This setup trains a Qwen3-4B model to solve ALFWorld household tasks using:
 
 | File | Description |
 |---|---|
-| `run_alfworld.py` | Main training launcher (subprocess pattern) |
+| `run_alfworld.py` | **Dr. GRPO** training — no ref model, token-level normalization |
+| `run_alfworld_grpo.py` | **Standard GRPO+KL** baseline — ref model + KL loss |
+| `eval_alfworld.py` | Per-task evaluation with profiles (short/medium/long) |
 | `alfworld_interaction.py` | `BaseInteraction` implementation wrapping ALFWorld |
 | `alfworld_interaction_config.yaml` | Interaction config (max_steps, history_length) |
 | `alfworld_reward.py` | Custom reward function reading turn_scores |
+| `patches/apply_verl_patches.py` | Patch script for verl agent loop modifications |
 | `requirements.txt` | Key dependencies |
 | `requirements-lock.txt` | Full dependency lock |
 
