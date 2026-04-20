@@ -117,6 +117,50 @@ def format_obs(obs: str, task: str) -> str:
         return obs
 
 
+def format_goal_facts(goal: dict) -> str:
+    """Format WebShop goal dict as privileged facts string.
+
+    Args:
+        goal: WebShop goal dict with keys: name, attributes, goal_options, price_upper, query
+
+    Returns:
+        Formatted string starting with "Target product:" prefix.
+    """
+    lines = []
+
+    # Target product name
+    name = goal.get("name", "Unknown")
+    lines.append(f"Target product: {name}")
+
+    # Required attributes (list of strings)
+    attributes = goal.get("attributes", [])
+    if attributes:
+        attr_str = ", ".join(str(a) for a in attributes)
+        lines.append(f"Required attributes: {attr_str}")
+
+    # Required options (dict or list)
+    goal_options = goal.get("goal_options", {})
+    if goal_options:
+        if isinstance(goal_options, dict):
+            options_str = ", ".join(f"{k}={v}" for k, v in goal_options.items())
+        else:
+            # Handle list case (fallback)
+            options_str = ", ".join(str(opt) for opt in goal_options)
+        lines.append(f"Required options: {options_str}")
+
+    # Price limit (omit if >= 1000000, which means no constraint)
+    price_upper = goal.get("price_upper", 1000000)
+    if price_upper < 1000000:
+        lines.append(f"Price limit: ${price_upper}")
+
+    # Best search query
+    query = goal.get("query", "")
+    if query:
+        lines.append(f"Best search query: {query}")
+
+    return "\n".join(lines)
+
+
 class WebShopInteraction(BaseInteraction):
     """WebShop as a verl interaction.
 
@@ -264,6 +308,14 @@ class WebShopInteraction(BaseInteraction):
             task = extract_task(obs)
             obs_formatted = format_obs(obs, task)
 
+            # Extract privileged facts from the goal
+            facts_str = ""
+            try:
+                goal = env.server.goals[goal_idx]
+                facts_str = format_goal_facts(goal)
+            except Exception as e:
+                logger.warning(f"Failed to extract WebShop goal facts: {e}")
+
             self.envs[instance_id] = {
                 "env": env,
                 "step_count": 0,
@@ -273,6 +325,7 @@ class WebShopInteraction(BaseInteraction):
                 "available_actions": info["available_actions"],
                 "history": [],
                 "goal_idx": goal_idx,
+                "facts_str": facts_str,
             }
             print(
                 f"[WebShop] instance={instance_id[:8]} index={prompt_index} "
@@ -305,7 +358,11 @@ class WebShopInteraction(BaseInteraction):
         if not env_state.get("initialized"):
             env_state["initialized"] = True
             initial_prompt = self._build_observation_prompt(env_state)
-            return False, initial_prompt, 0.0, {"step": 0, "initial": True}
+            return False, initial_prompt, 0.0, {
+                "step": 0,
+                "initial": True,
+                "facts_str": env_state.get("facts_str", ""),
+            }
 
         # Extract the last assistant message as the raw action
         raw_action = ""
@@ -365,6 +422,7 @@ class WebShopInteraction(BaseInteraction):
             "is_valid": is_valid,
             "won": won,
             "task_score": task_score,
+            "facts_str": env_state.get("facts_str", ""),
         }
 
     async def finalize_interaction(self, instance_id: str = None, **kwargs) -> None:
