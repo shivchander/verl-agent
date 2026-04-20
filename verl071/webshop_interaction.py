@@ -414,6 +414,14 @@ class WebShopInteraction(BaseInteraction):
         env_state["done"] = done or env_state["step_count"] >= self.max_steps
         should_terminate = env_state["done"]
 
+        # Close env on termination to prevent resource leak
+        if should_terminate:
+            try:
+                env.close()
+            except Exception:
+                pass
+            env_state["env"] = None
+
         next_prompt = self._build_observation_prompt(env_state)
 
         return should_terminate, next_prompt, reward_val, {
