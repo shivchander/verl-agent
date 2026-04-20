@@ -180,6 +180,55 @@ Your admissible actions are: [{actions}].
 ...
 ```
 
+## Evaluation
+
+Per-task evaluation on ALFWorld valid_seen (140 games) and valid_unseen (134 games):
+
+```bash
+# Convert FSDP checkpoint to HF format
+python -m verl.model_merger merge \
+    --backend fsdp \
+    --local_dir checkpoints/.../global_step_230/actor \
+    --target_dir /path/to/hf_model
+
+# Quick eval (unseen, 1 seed) — auto-launches vLLM server
+python verl071/eval_alfworld.py \
+    --checkpoint /path/to/hf_model \
+    --split unseen --seed 123 \
+    --gpu 0 \
+    --output eval_results.json
+
+# Full eval (both splits, 3 seeds)
+python verl071/eval_alfworld.py \
+    --checkpoint /path/to/hf_model \
+    --full --gpu 0 \
+    --output eval_full.json
+
+# With existing vLLM server
+python verl071/eval_alfworld.py \
+    --checkpoint /path/to/hf_model \
+    --full --no-server --api-base http://localhost:8100/v1
+```
+
+Key flags:
+- `--max-concurrent 8`: parallel games via multiprocessing (default: 16)
+- `--temperature 0.4`: matches training val settings
+- `--max-steps 50`: max turns per episode
+
+The eval maintains full multi-turn conversation history matching training rollouts.
+
+### Step 230 Results (eval_out_of_distribution, seed 123)
+
+| Task Type | Won | Total | Rate |
+|---|---|---|---|
+| pick_and_place_simple | 23 | 24 | 95.8% |
+| look_at_obj_in_light | 9 | 18 | 50.0% |
+| pick_clean_then_place_in_recep | 20 | 31 | 64.5% |
+| pick_heat_then_place_in_recep | 16 | 23 | 69.6% |
+| pick_cool_then_place_in_recep | 11 | 21 | 52.4% |
+| pick_two_obj_and_place | 13 | 17 | 76.5% |
+| **OVERALL** | **92** | **134** | **68.7%** |
+
 ## Differences from Original verl-agent (0.3.1)
 
 | Aspect | Original (0.3.1) | This Setup (0.7.1) |
