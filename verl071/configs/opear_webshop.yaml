@@ -1,0 +1,8 @@
+# WebShop O-PEaR config — conservative start
+opear_lambda: 0.1
+opear_beta: 0.1
+opear_margin: 0.0
+opear_selection_ratio: 0.5
+opear_guide_model: gpt-5.4-nano
+epochs: 250
+experiment_name: drgrpo_opear_webshop_qwen3_4b
