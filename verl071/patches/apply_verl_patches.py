@@ -116,6 +116,27 @@ def main():
     )
     success = success and ok
 
+    print("Patch 4: Propagate interaction extra_info to agent_data.extra_fields")
+    ok = patch_file(
+        tool_agent_loop_path,
+        'if reward is not None:\n'
+        '            agent_data.turn_scores.append(reward)\n'
+        '\n'
+        '        # Update prompt with user responses (similar to _handle_processing_tools_state)',
+        'if reward is not None:\n'
+        '            agent_data.turn_scores.append(reward)\n'
+        '\n'
+        '        # Propagate interaction extra_info (e.g. facts_str) to extra_fields\n'
+        '        if isinstance(metrics, dict):\n'
+        '            for _k in ("facts_str",):\n'
+        '                if _k in metrics:\n'
+        '                    agent_data.extra_fields[_k] = metrics[_k]\n'
+        '\n'
+        '        # Update prompt with user responses (similar to _handle_processing_tools_state)',
+        "tool_agent_loop.py: propagate facts_str from interaction to extra_fields",
+    )
+    success = success and ok
+
     print()
     if success:
         print("All patches applied successfully.")

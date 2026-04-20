@@ -116,8 +116,9 @@ def prepare_data(cfg: dict):
 
 
 def build_cmd(cfg: dict) -> list[str]:
-    interaction_config = os.path.join(os.getcwd(), "webshop_interaction_config.yaml")
-    reward_fn = os.path.join(os.getcwd(), "webshop_reward.py")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    interaction_config = os.path.join(script_dir, "webshop_interaction_config.yaml")
+    reward_fn = os.path.join(script_dir, "webshop_reward.py")
     loss_scale = cfg["max_response_length"]
 
     cmd = [

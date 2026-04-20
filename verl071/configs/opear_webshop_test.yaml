@@ -1,0 +1,43 @@
+# WebShop O-PEaR E2E test — 3 epochs, verbose logging
+experiment_name: opear_webshop_e2e_test
+gpus: "0,1,2,3"
+
+# O-PEaR config
+opear_enable: true
+opear_lambda: 0.1
+opear_beta: 0.1
+opear_margin: 3
+opear_selection_ratio: 1
+opear_guide_model: gpt-5.4-nano
+
+# Model
+model: Qwen/Qwen3-4B
+tp: 2
+gpu_memory_utilization: 0.5
+max_model_len: 8192
+
+# Data — small batch for quick test
+group_size: 4
+train_batch_size: 4
+val_batch_size: 4
+max_prompt_length: 2048
+max_response_length: 4096
+seed: 42
+
+# Actor
+lr: 1.0e-6
+loss_agg_mode: seq-mean-token-sum-norm
+
+# Algorithm
+gamma: 0.95
+
+# Agent loop
+max_user_turns: 15
+
+# Trainer — just 3 epochs, no saving
+epochs: 3
+save_freq: -1
+test_freq: 1
+val_before_train: true
+logger: '["console"]'
+project_name: opear_webshop_test
