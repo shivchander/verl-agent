@@ -289,6 +289,7 @@ class AlfWorldInteraction(BaseInteraction):
                 "admissible_commands": [],
                 "history": [],
                 "game_idx": -1,
+                "facts_str": "",
             }
 
         return instance_id

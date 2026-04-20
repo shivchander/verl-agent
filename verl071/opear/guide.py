@@ -67,6 +67,10 @@ class OPEaRGuide:
         return None
 
     def generate_pair(self, turns: list[dict], task_description: str, facts: str) -> Optional[dict]:
+        if not facts or not facts.strip():
+            logger.warning("Empty privileged facts — guide model has no environment state. "
+                           "Contrastive pairs will be uninformed. Check interaction facts extraction.")
+
         expected_turns = sum(1 for t in turns if t["role"] == "assistant")
         if expected_turns == 0:
             logger.warning("No assistant turns found in trajectory; skipping.")
