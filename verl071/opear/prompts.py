@@ -82,6 +82,78 @@ Output format (one block per assistant turn):
 ...
 """
 
+COMPLIANT_SYSTEM_WEBSHOP = """\
+You are an expert rewriting assistant for the WebShop e-commerce environment.
+
+You will be given:
+1. A task description (shopping instruction).
+2. A multi-turn trajectory of the student agent, consisting of observations \
+(webpage content, search results) and the student's assistant responses.
+3. Privileged ground-truth facts about the target product, including attributes, \
+options, price, and search query.
+
+Your job is to rewrite ONLY the assistant responses so that the chosen \
+actions lead toward purchasing the CORRECT product with the RIGHT options. \
+Do not alter observations.
+
+Rules:
+- Each rewritten response MUST use EXACTLY this format (no extra text):
+    <think>YOUR REASONING HERE</think><action>YOUR ACTION HERE</action>
+- The action MUST be chosen from the admissible actions listed in the \
+corresponding observation. Use the privileged facts to pick the CORRECT action \
+that moves toward the right product with the right attributes and options.
+- Your reasoning in <think> must ONLY reference information the agent can \
+observe (the task description, current webpage content, search results, and \
+admissible actions). Do NOT mention or quote the privileged facts, exact target \
+product name, ASIN, or any hidden information in the <think> tags. The reasoning \
+should sound natural, as if the agent figured out the correct action from its \
+observations alone.
+- Produce exactly one rewritten response per assistant turn.
+- Label each rewritten response with a [TURN N] marker (1-indexed).
+
+Output format (one block per assistant turn):
+[TURN 1]
+<think>...</think><action>...</action>
+[TURN 2]
+<think>...</think><action>...</action>
+...
+"""
+
+VIOLATING_SYSTEM_WEBSHOP = """\
+You are an expert rewriting assistant for the WebShop e-commerce environment.
+
+You will be given:
+1. A task description (shopping instruction).
+2. A multi-turn trajectory of the student agent, consisting of observations \
+(webpage content, search results) and the student's assistant responses.
+3. Privileged ground-truth facts about the target product, including attributes, \
+options, price, and search query.
+
+Your job is to rewrite ONLY the assistant responses so that they sound \
+PLAUSIBLE given the observations alone, but actually lead AWAY from the \
+correct product. Do not alter observations.
+
+Rules:
+- Each rewritten response MUST use EXACTLY this format (no extra text):
+    <think>YOUR REASONING HERE</think><action>YOUR ACTION HERE</action>
+- The action MUST be chosen from the admissible actions listed in the \
+corresponding observation, but should lead away from the correct solution. \
+Examples of bad actions: selecting the wrong product, choosing wrong options, \
+purchasing prematurely without checking criteria, using a poor search query, \
+or unnecessary backtracking.
+- Your reasoning in <think> should sound convincing but reflect incorrect \
+beliefs about which product matches the requirements or what attributes matter.
+- Produce exactly one rewritten response per assistant turn.
+- Label each rewritten response with a [TURN N] marker (1-indexed).
+
+Output format (one block per assistant turn):
+[TURN 1]
+<think>...</think><action>...</action>
+[TURN 2]
+<think>...</think><action>...</action>
+...
+"""
+
 
 # ---------------------------------------------------------------------------
 # Trajectory formatting
@@ -119,20 +191,26 @@ def build_guide_prompt(
 ) -> list[dict]:
     """Build chat messages for the OpenAI API guide call.
 
+    Auto-detects environment (ALFWorld vs WebShop) from facts content and
+    selects the appropriate prompt template.
+
     Args:
         turns: multi-turn trajectory (see format_trajectory).
-        task_description: the ALFWorld task description string.
+        task_description: the task description string.
         mode: "compliant" or "violating".
-        facts: privileged PDDL facts from the environment state.
+        facts: privileged facts from the environment state.
 
     Returns:
         A list of message dicts suitable for the OpenAI chat completions API,
         with "role" and "content" keys.
     """
+    # Auto-detect environment from facts content
+    is_webshop = facts.startswith("Target product:")
+
     if mode == "compliant":
-        system_prompt = COMPLIANT_SYSTEM
+        system_prompt = COMPLIANT_SYSTEM_WEBSHOP if is_webshop else COMPLIANT_SYSTEM
     elif mode == "violating":
-        system_prompt = VIOLATING_SYSTEM
+        system_prompt = VIOLATING_SYSTEM_WEBSHOP if is_webshop else VIOLATING_SYSTEM
     else:
         raise ValueError(f"Unknown mode: {mode!r}. Must be 'compliant' or 'violating'.")
 
