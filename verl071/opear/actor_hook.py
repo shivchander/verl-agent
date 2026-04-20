@@ -53,8 +53,12 @@ def opear_accumulate_gradients(actor, data, metrics):
     num_pairs = c_ids.shape[0]
     resp_len = c_mask.shape[-1]
 
-    # Snapshot grad norm BEFORE any O-PEaR backward (captures GRPO-only grads)
+    # Snapshot per-parameter grads BEFORE any O-PEaR backward (captures GRPO-only grads)
     grpo_grad_norm = _grad_norm(actor.actor_module)
+    grpo_grads = {
+        n: p.grad.data.clone() for n, p in actor.actor_module.named_parameters()
+        if p.grad is not None
+    }
 
     # Accumulators for metrics (averaged over pairs at the end)
     total_loss = 0.0
@@ -118,9 +122,16 @@ def opear_accumulate_gradients(actor, data, metrics):
 
         gap_values.append(pair_metrics.get("opear/logprob_gap", 0.0))
 
-    # Grad norm AFTER all O-PEaR backwards (captures GRPO + OPEAR combined)
+    # Compute O-PEaR grad norm by subtracting snapshotted GRPO grads
     combined_grad_norm = _grad_norm(actor.actor_module)
-    opear_grad_norm = abs(combined_grad_norm - grpo_grad_norm)
+    opear_grad_sq = 0.0
+    for n, p in actor.actor_module.named_parameters():
+        if p.grad is not None and n in grpo_grads:
+            opear_grad_sq += (p.grad.data.float() - grpo_grads[n].float()).norm().item() ** 2
+        elif p.grad is not None:
+            opear_grad_sq += p.grad.data.float().norm().item() ** 2
+    opear_grad_norm = opear_grad_sq ** 0.5
+    del grpo_grads
 
     # Build final metrics: average per-pair values
     opear_metrics = {}
