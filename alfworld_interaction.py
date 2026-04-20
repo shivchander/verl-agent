@@ -82,6 +82,29 @@ def format_admissible(actions: list[str]) -> str:
     return "\n ".join(f"'{s}'" for s in actions if s != "help")
 
 
+# Predicates that carry actionable state for O-PEaR's guide model
+_USEFUL_PREDICATES = {
+    "inreceptacle", "holds",
+    "isclean", "ishot", "iscool", "issliced",
+    "opened",
+}
+
+
+def serialize_facts(raw_facts: list) -> str:
+    """Serialize PDDL facts into a compact string for the guide model.
+
+    Filters to actionable predicates (object locations, held items,
+    object states) and formats as 'predicate(arg1, arg2); ...'.
+    """
+    if not raw_facts:
+        return ""
+    useful = [f for f in raw_facts if hasattr(f, "name") and f.name in _USEFUL_PREDICATES]
+    return "; ".join(
+        f"{f.name}({', '.join(v.name.strip() for v in f.arguments)})"
+        for f in useful
+    )
+
+
 class AlfWorldInteraction(BaseInteraction):
     """ALFWorld text game as a verl interaction.
 
@@ -152,7 +175,8 @@ class AlfWorldInteraction(BaseInteraction):
         wrappers = [alfred_demangler, AlfredInfos]
 
         request_infos = textworld.EnvInfos(
-            won=True, admissible_commands=True, extras=["gamefile"]
+            won=True, admissible_commands=True, facts=True,
+            extras=["gamefile"],
         )
 
         env_id = textworld.gym.register_games(
@@ -233,6 +257,12 @@ class AlfWorldInteraction(BaseInteraction):
 
             task = self._extract_task(initial_obs)
 
+            # Extract privileged PDDL facts for O-PEaR
+            raw_facts = info.get("facts", [])
+            if isinstance(raw_facts, (list, tuple)) and raw_facts and isinstance(raw_facts[0], list):
+                raw_facts = raw_facts[0]
+            facts_str = serialize_facts(raw_facts)
+
             self.envs[instance_id] = {
                 "game_env": game_env,
                 "step_count": 0,
@@ -242,6 +272,7 @@ class AlfWorldInteraction(BaseInteraction):
                 "admissible_commands": admissible,
                 "history": [],
                 "game_idx": game_idx,
+                "facts_str": facts_str,
             }
             print(
                 f"[ALFWorld] instance={instance_id[:8]} index={prompt_index} "
@@ -274,7 +305,10 @@ class AlfWorldInteraction(BaseInteraction):
         if not env_state.get("initialized"):
             env_state["initialized"] = True
             initial_prompt = self._build_observation_prompt(env_state)
-            return False, initial_prompt, 0.0, {"step": 0, "initial": True}
+            return False, initial_prompt, 0.0, {
+                "step": 0, "initial": True,
+                "facts_str": env_state.get("facts_str", ""),
+            }
 
         # Extract the last assistant message as the raw action
         raw_action = ""
@@ -307,6 +341,11 @@ class AlfWorldInteraction(BaseInteraction):
             if isinstance(admissible, (list, tuple)) and admissible and isinstance(admissible[0], list):
                 admissible = admissible[0]
 
+            # Update facts after step (object locations change as agent acts)
+            raw_facts = info.get("facts", [])
+            if raw_facts:
+                env_state["facts_str"] = serialize_facts(raw_facts)
+
         except Exception as e:
             logger.error(f"ALFWorld step error: {e}")
             obs_text = f"Error: {e}"
@@ -328,6 +367,7 @@ class AlfWorldInteraction(BaseInteraction):
             "done": done,
             "is_valid": is_valid,
             "won": won if not done else 0.0,
+            "facts_str": env_state.get("facts_str", ""),
         }
 
     async def finalize_interaction(self, instance_id: str = None, **kwargs) -> None:
