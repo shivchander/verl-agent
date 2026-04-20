@@ -168,3 +168,81 @@ class TestSelectBatchPositions:
         batch = SimpleNamespace(non_tensor_batch={})
         selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5)
         assert selected == []
+
+    # --- Reward-based selection tests ---
+
+    def test_reward_filters_winners(self):
+        """Only non-winning rollouts (reward < 10) should be selected."""
+        import torch
+        from verl071.opear.data import select_batch_positions
+        # 2 groups of 4: positions 0-3 = group a, 4-7 = group b
+        uids = ["a"] * 4 + ["b"] * 4
+        batch = self._make_batch(uids)
+        # Rewards: positions 0,4 won (10.0); rest failed (0.0)
+        rewards = torch.tensor([10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0])
+        selected = select_batch_positions(batch, group_size=4, selection_ratio=1.0, rewards=rewards)
+        # Should exclude positions 0 and 4 (winners)
+        assert 0 not in selected
+        assert 4 not in selected
+        # Should include all 6 failures
+        assert len(selected) == 6
+        assert set(selected) == {1, 2, 3, 5, 6, 7}
+
+    def test_reward_all_winners_returns_empty(self):
+        """If all rollouts won, no positions should be selected."""
+        import torch
+        from verl071.opear.data import select_batch_positions
+        uids = ["a"] * 4
+        batch = self._make_batch(uids)
+        rewards = torch.tensor([10.0, 10.0, 10.0, 10.0])
+        selected = select_batch_positions(batch, group_size=4, selection_ratio=1.0, rewards=rewards)
+        assert selected == []
+
+    def test_reward_all_failures_selects_all(self):
+        """If all rollouts failed, all should be selected with ratio=1."""
+        import torch
+        from verl071.opear.data import select_batch_positions
+        uids = ["a"] * 4 + ["b"] * 4
+        batch = self._make_batch(uids)
+        rewards = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        selected = select_batch_positions(batch, group_size=4, selection_ratio=1.0, rewards=rewards)
+        assert len(selected) == 8
+
+    def test_reward_with_cap(self):
+        """selection_ratio < 1 caps the number of failures per group."""
+        import torch
+        from verl071.opear.data import select_batch_positions
+        uids = ["a"] * 8 + ["b"] * 8
+        batch = self._make_batch(uids)
+        # All failed
+        rewards = torch.zeros(16)
+        selected = select_batch_positions(batch, group_size=8, selection_ratio=0.5, rewards=rewards)
+        # Cap = floor(0.5 * 8) = 4 per group, 2 groups = 8 total
+        assert len(selected) == 8
+        # Verify per-group cap
+        group_a = [i for i in selected if i < 8]
+        group_b = [i for i in selected if i >= 8]
+        assert len(group_a) == 4
+        assert len(group_b) == 4
+
+    def test_reward_negative_penalties_still_selected(self):
+        """Rollouts with negative reward (invalid penalties) should be selected."""
+        import torch
+        from verl071.opear.data import select_batch_positions
+        uids = ["a"] * 4
+        batch = self._make_batch(uids)
+        rewards = torch.tensor([10.0, -0.3, 0.0, 9.9])
+        selected = select_batch_positions(batch, group_size=4, selection_ratio=1.0, rewards=rewards)
+        # Position 0 won (10.0), rest are failures
+        assert 0 not in selected
+        assert set(selected) == {1, 2, 3}
+
+    def test_no_rewards_legacy_behavior(self):
+        """Without rewards, all positions are eligible (legacy fallback)."""
+        from verl071.opear.data import select_batch_positions
+        uids = ["a"] * 4 + ["b"] * 4
+        batch = self._make_batch(uids)
+        # No rewards passed — should use all positions with cap
+        selected = select_batch_positions(batch, group_size=4, selection_ratio=0.5)
+        # floor(0.5 * 4) = 2 per group, 2 groups = 4 total
+        assert len(selected) == 4

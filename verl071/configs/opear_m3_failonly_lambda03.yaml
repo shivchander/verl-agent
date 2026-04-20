@@ -1,10 +1,10 @@
-# O-PEaR with logsigmoid loss, lambda=1.0 — strong bounded regularization
-experiment_name: drgrpo_opear_logsigmoid_lambda1_qwen3_4b
+# O-PEaR with margin=3, failed-only selection, lambda=0.3
+experiment_name: drgrpo_opear_m3_failonly_lambda03_qwen3_4b
 gpus: "0,1,2,3"
 
 # O-PEaR config
 opear_enable: true
-opear_lambda: 1.0
+opear_lambda: 0.3
 opear_beta: 0.1
 opear_margin: 3
 opear_selection_ratio: 1

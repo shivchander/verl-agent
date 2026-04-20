@@ -4,7 +4,12 @@ The O-PEaR regularizer encourages the policy to assign higher probability to
 compliant responses (consistent with environment facts) and lower probability
 to violating responses (contradicting facts).
 
-Loss: L = -mean(log_sigmoid(beta * mean_gap))
+Loss: L = -mean(log_sigmoid(beta * mean_gap - margin))
+
+The margin shifts the saturation point: the model must push the gap past
+margin/beta before gradients decay. This prevents the near-zero gradient
+problem observed when the gap saturates (e.g., gap=58 with beta=0.1 gave
+gradient multiplier 0.003 without margin, vs 0.07 with margin=3).
 
 Uses per-token-mean log-probs to keep the logsigmoid in its active range.
 Gradient magnitude matching with GRPO is handled by the scaling in
@@ -23,6 +28,7 @@ def compute_opear_loss(
     violating_log_probs: torch.Tensor,  # (N, response_len)
     violating_mask: torch.Tensor,       # (N, response_len)
     beta: float = 1.0,
+    margin: float = 0.0,
 ) -> tuple[torch.Tensor, dict]:
     """Compute the O-PEaR regularization loss.
 
@@ -36,6 +42,8 @@ def compute_opear_loss(
         violating_mask: Binary mask indicating valid tokens in violating
             responses. Shape (N, response_len).
         beta: Temperature controlling saturation speed. Default 1.0.
+        margin: Shifts the saturation point. Gradients stay strong until
+            gap > margin/beta. Default 0.0 (no margin, backward compat).
 
     Returns:
         loss: Scalar tensor.
@@ -53,7 +61,7 @@ def compute_opear_loss(
     # Per-token-mean gap (keeps logsigmoid in active range ~[-10, 10])
     gap = compliant_mean_lp - violating_mean_lp  # (N,)
 
-    loss = -F.logsigmoid(beta * gap).mean()
+    loss = -F.logsigmoid(beta * gap - margin).mean()
 
     metrics = {
         "opear/loss": loss.detach().item(),
@@ -66,6 +74,7 @@ def compute_opear_loss(
         "opear/num_pairs": num_pairs,
         "opear/compliant_length": compliant_lengths.mean().detach().item(),
         "opear/violating_length": violating_lengths.mean().detach().item(),
+        "opear/margin": margin,
     }
 
     return loss, metrics

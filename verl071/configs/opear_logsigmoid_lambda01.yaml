@@ -6,7 +6,8 @@ gpus: "4,5,6,7"
 opear_enable: true
 opear_lambda: 0.1
 opear_beta: 0.1
-opear_selection_ratio: 0.5
+opear_margin: 3
+opear_selection_ratio: 1
 opear_guide_model: gpt-5.4-nano
 
 # Model

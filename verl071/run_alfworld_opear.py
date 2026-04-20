@@ -40,6 +40,7 @@ DEFAULTS = {
     "opear_lambda": 0.5,
     "opear_beta": 1.0,
     "opear_selection_ratio": 0.5,
+    "opear_margin": 0.0,
     "opear_guide_model": "gpt-5.4-nano",
     # Agent loop
     "max_user_turns": 50,
@@ -81,6 +82,7 @@ def build_cmd(cfg: dict) -> list[str]:
         f"+algorithm.opear.lambda_coef={cfg['opear_lambda']}",
         f"+algorithm.opear.beta={cfg['opear_beta']}",
         f"+algorithm.opear.selection_ratio={cfg['opear_selection_ratio']}",
+        f"+algorithm.opear.margin={cfg['opear_margin']}",
         f"+algorithm.opear.guide_model={cfg['opear_guide_model']}",
         # Data
         f"data.train_files={os.path.expanduser('~/data/verl-agent/text/train.parquet')}",

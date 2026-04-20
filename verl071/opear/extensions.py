@@ -46,8 +46,10 @@ def _extend_trainer():
             self.opear_selection_ratio = cfg.get("selection_ratio", 0.5)
             self.opear_lambda = cfg.get("lambda_coef", 0.5)
             self.opear_beta = cfg.get("beta", 1.0)
+            self.opear_margin = cfg.get("margin", 0.0)
             print(f"[O-PEaR] enabled: lambda={self.opear_lambda}, "
-                  f"beta={self.opear_beta}, selection_ratio={self.opear_selection_ratio}")
+                  f"beta={self.opear_beta}, margin={self.opear_margin}, "
+                  f"selection_ratio={self.opear_selection_ratio}")
 
     def _update_actor(self, batch):
         if getattr(self, "opear_enabled", False):
@@ -67,11 +69,20 @@ def _generate_contrastive_data(trainer, batch):
     """Generate contrastive pairs and attach to batch.meta_info."""
     from verl071.opear.data import select_batch_positions, reconstruct_trajectories, tokenize_contrastive_responses
 
-    # Select first (cheap index math), then reconstruct only selected (expensive decoding)
+    # Extract per-rollout rewards for failed-only selection
+    import torch
+    rewards = None
+    if "token_level_scores" in batch.batch:
+        # token_level_scores is (batch_size, seq_len); sum to get per-rollout reward
+        tls = batch.batch["token_level_scores"]
+        rewards = tls.sum(-1) if tls.dim() > 1 else tls
+
+    # Select failed rollouts (cheap index math), then reconstruct only selected (expensive decoding)
     positions = select_batch_positions(
         batch,
         group_size=trainer.config.actor_rollout_ref.rollout.n,
         selection_ratio=trainer.opear_selection_ratio,
+        rewards=rewards,
     )
     if not positions:
         print("[O-PEaR] no positions selected, skipping")
@@ -95,6 +106,7 @@ def _generate_contrastive_data(trainer, batch):
         batch.meta_info["opear_data"] = opear_data
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
         batch.meta_info["opear_beta"] = trainer.opear_beta
+        batch.meta_info["opear_margin"] = trainer.opear_margin
         batch.meta_info["opear_selection_ratio"] = trainer.opear_selection_ratio
         batch.meta_info["opear_guide_time_s"] = guide_time
         # Mean assistant segments per trajectory (how multi-turn the rollouts are)

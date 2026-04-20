@@ -39,6 +39,7 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     lam = data.meta_info.get("opear_lambda", 0.5)
     beta = data.meta_info.get("opear_beta", 1.0)
+    margin = data.meta_info.get("opear_margin", 0.0)
     temperature = data.meta_info.get("temperature", 1.0)
     device = next(actor.actor_module.parameters()).device
 
@@ -100,7 +101,7 @@ def opear_accumulate_gradients(actor, data, metrics):
         vi_rm = vi_mask[:, : v_lp.shape[-1]]
 
         pair_loss, pair_metrics = compute_opear_loss(
-            c_lp, ci_rm, v_lp, vi_rm, beta=beta
+            c_lp, ci_rm, v_lp, vi_rm, beta=beta, margin=margin
         )
 
         # No loss_sf: per-token-mean already normalizes by sequence length,
@@ -150,6 +151,7 @@ def opear_accumulate_gradients(actor, data, metrics):
 
     metrics["opear/lambda"] = lam
     metrics["opear/beta"] = beta
+    metrics["opear/margin"] = margin
     metrics["opear/selection_ratio"] = data.meta_info.get("opear_selection_ratio", 0.5)
 
 

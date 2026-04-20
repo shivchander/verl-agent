@@ -17,16 +17,27 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def select_batch_positions(batch, group_size: int, selection_ratio: float) -> list[int]:
+def select_batch_positions(
+    batch,
+    group_size: int,
+    selection_ratio: float,
+    rewards: Optional[torch.Tensor] = None,
+) -> list[int]:
     """Select batch positions for contrastive pair generation.
 
-    Selects floor(selection_ratio * group_size) rollouts per task group.
-    Only does index math — no decoding, no tokenization.
+    Selects failed rollouts (reward < 10) from each task group. The
+    ``selection_ratio`` parameter acts as an optional cap: when set to 1
+    (default), all failures are used. When < 1, at most
+    ``floor(ratio * group_size)`` failures are sampled per group.
 
     Args:
         batch: DataProto with non_tensor_batch["uid"].
         group_size: Number of rollouts per group (rollout.n).
-        selection_ratio: Fraction of each group to select.
+        selection_ratio: Cap on fraction of each group to select.
+            1.0 means use all failures (no cap).
+        rewards: Optional 1-D tensor of per-rollout rewards. When
+            provided, only positions with reward < 10 are eligible.
+            When None, falls back to selecting all positions (legacy).
 
     Returns:
         List of selected batch position indices.
@@ -40,15 +51,27 @@ def select_batch_positions(batch, group_size: int, selection_ratio: float) -> li
         logger.warning("No 'uid' field in batch.non_tensor_batch")
         return []
 
+    # Build per-group position lists, filtering by reward
     groups: dict[str, list[int]] = defaultdict(list)
     for i, uid in enumerate(uids):
+        if rewards is not None:
+            reward_val = float(rewards[i])
+            if reward_val >= 10.0:
+                continue  # skip winning rollouts
         groups[str(uid)].append(i)
 
-    k_per_group = max(1, math.floor(selection_ratio * group_size))
-    selected: list[int] = []
-    for positions in groups.values():
-        k = min(k_per_group, len(positions))
-        selected.extend(random.sample(positions, k))
+    # Apply optional cap
+    if selection_ratio >= 1.0:
+        # No cap — use all failures
+        selected: list[int] = []
+        for positions in groups.values():
+            selected.extend(positions)
+    else:
+        k_per_group = max(1, math.floor(selection_ratio * group_size))
+        selected = []
+        for positions in groups.values():
+            k = min(k_per_group, len(positions))
+            selected.extend(random.sample(positions, k))
 
     return selected
 
