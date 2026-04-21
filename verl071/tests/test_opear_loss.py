@@ -295,3 +295,81 @@ class TestOPEaRLossLogsigmoid:
 
         with pytest.raises(ValueError, match="Unknown loss_type"):
             compute_opear_loss(lp, mask, lp, mask, loss_type="invalid")
+
+
+class TestThreeWayRankingLoss:
+    """Test the three-way ranking loss: L_cv + L_cp."""
+
+    def test_policy_anchor_pushes_compliant_up(self):
+        """L_cp gradient on compliant should be negative (pushes c up)."""
+        N, L = 1, 1
+        c_lp = torch.tensor([[-2.0]], requires_grad=True)
+        v_lp = torch.tensor([[-4.0]])
+        c_mask = torch.ones(N, L)
+        v_mask = torch.ones(N, L)
+        p_lp = torch.tensor([-1.0])
+
+        loss, metrics = compute_opear_loss(
+            c_lp, c_mask, v_lp, v_mask,
+            beta=1.0, margin=2.0, policy_mean_lp=p_lp,
+        )
+        loss.backward()
+
+        assert c_lp.grad.item() < 0
+        assert "opear/cv_loss" in metrics
+        assert "opear/cp_loss" in metrics
+        assert "opear/policy_logprob" in metrics
+        assert "opear/cp_gap" in metrics
+
+    def test_no_policy_logprob_falls_back_to_cv_only(self):
+        """Without policy_mean_lp, loss should equal L_cv only."""
+        N, L = 1, 1
+        c_lp = torch.tensor([[-1.0]])
+        v_lp = torch.tensor([[-3.0]])
+        mask = torch.ones(N, L)
+
+        loss_with, _ = compute_opear_loss(
+            c_lp, mask, v_lp, mask,
+            beta=1.0, margin=2.0, policy_mean_lp=None,
+        )
+        loss_without, _ = compute_opear_loss(
+            c_lp, mask, v_lp, mask,
+            beta=1.0, margin=2.0,
+        )
+
+        assert loss_with.item() == pytest.approx(loss_without.item(), abs=1e-6)
+
+    def test_cp_loss_no_margin(self):
+        """L_cp should use no margin (margin_cp=0)."""
+        N, L = 1, 1
+        c_lp = torch.tensor([[-3.0]])
+        v_lp = torch.tensor([[-5.0]])
+        mask = torch.ones(N, L)
+        p_lp = torch.tensor([-1.0])
+
+        _, metrics = compute_opear_loss(
+            c_lp, mask, v_lp, mask,
+            beta=1.0, margin=2.0, policy_mean_lp=p_lp,
+        )
+
+        assert metrics["opear/cp_gap"] == pytest.approx(-2.0, abs=1e-5)
+
+    def test_total_loss_is_sum_of_cv_and_cp(self):
+        """Total loss should be L_cv + L_cp."""
+        import torch.nn.functional as F
+        N, L = 1, 1
+        c_lp = torch.tensor([[-2.0]])
+        v_lp = torch.tensor([[-4.0]])
+        mask = torch.ones(N, L)
+        p_lp = torch.tensor([-1.0])
+
+        _, metrics = compute_opear_loss(
+            c_lp, mask, v_lp, mask,
+            beta=1.0, margin=2.0, policy_mean_lp=p_lp,
+        )
+
+        expected_cv = -F.logsigmoid(torch.tensor(1.0 * (2.0 - 2.0))).item()
+        expected_cp = -F.logsigmoid(torch.tensor(1.0 * (-2.0 - (-1.0)))).item()
+        assert metrics["opear/cv_loss"] == pytest.approx(expected_cv, abs=1e-5)
+        assert metrics["opear/cp_loss"] == pytest.approx(expected_cp, abs=1e-5)
+        assert metrics["opear/loss"] == pytest.approx(expected_cv + expected_cp, abs=1e-5)
