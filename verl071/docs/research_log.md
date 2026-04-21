@@ -217,6 +217,61 @@ Initial implementation tried to index `data.batch["old_log_probs"]` with global 
 
 ---
 
+## 2026-04-20 — WebShop: Dr. GRPO baseline + O-PEaR port
+
+### Setup
+- Ported O-PEaR from ALFWorld to WebShop e-commerce benchmark
+- WebShop: 6910 goals, 1000 products, search/click actions, partial credit scoring
+- Model: Qwen3-4B, 4 GPUs TP=2, max_model_len=8192, response_budget=4096
+
+### Dr. GRPO baseline (no O-PEaR)
+- Trained 200 steps (crashed at 234 from max_tokens=0 bug)
+- **Eval: Score=36.27, #Act=9.09, SR=3.2%**
+- Baseline Qwen3-4B: Score=21.35, #Act=12.35, SR=3.0%
+- Dr. GRPO improved score by 70% over baseline
+
+### WebShop O-PEaR Exp W1 & W2: beta=0.1, old formula
+- Margin formula: `beta * gap - margin` (pre-fix)
+- beta=0.1, margin=3, lambda=0.1
+- W1: sr=1.0 (killed at step 80), W2: sr=0.5 (crashed at step 25 from max_tokens=0)
+
+#### BUG: max_tokens=0 crash
+- `vllm_async_server.py` computed `max_tokens = min(response_length, prompt_length + response_length - len(prompt_ids))`
+- In multi-turn, prompt_ids grows beyond `prompt_length + response_length` (6144) due to env observations
+- Result: negative → clamped to 0 → vLLM validation error
+- **Fix (Patch 5)**: Use `max_model_len - len(prompt_ids)` as budget, clamp to min 1
+
+#### Results (restarted post-fix)
+- Gap exploded to 50+ by step 40 (same saturation problem as ALFWorld)
+- **Eval W2 sr=0.5 step 100: Score=23.09, #Act=11.92, SR=2.4%**
+- Barely above baseline (21.35), well below Dr. GRPO (36.27)
+- O-PEaR contrastive loss converged but didn't improve task completion
+
+### WebShop O-PEaR Exp W3 & W4: beta=1.0, fixed formula
+- Fixed margin formula: `beta * (gap - margin)`
+- beta=1.0, margin=3, lambda=0.1
+- Gap controlled: plateaued around 3-6 (vs 50+ with old formula)
+- Val reward: 0.077-0.156 (sporadic but consistent)
+- Killed at steps 127/82 to apply enriched facts + three-way loss
+
+### Key finding: Weak privileged information
+Identified that WebShop's privileged facts are ~90% redundant with the task description:
+- **ALFWorld**: PDDL facts reveal hidden state (object locations, container contents) the agent cannot observe → strong information asymmetry
+- **WebShop**: Facts (product name, attributes, query) mostly restate the task description → weak information asymmetry
+
+The only truly hidden info was the exact product name and best search query.
+
+### Fix: Enriched privileged facts
+Added to `format_goal_facts()`:
+- **ASIN**: Target product ID (visible in search results, agent doesn't know which is correct)
+- **All product attributes**: Full attribute list from catalog (not just required ones)
+- **Available options**: All colors, sizes, etc. with all values
+- **Price range**: Actual product price
+
+This gives the guide model actionable hidden state: which product to click, which options exist, whether it's in budget.
+
+---
+
 ## Bug Tracker
 
 | Bug | Impact | Fix | Commit |
@@ -225,6 +280,8 @@ Initial implementation tried to index `data.batch["old_log_probs"]` with global 
 | Margin formula `beta*gap-margin` | Saturation at gap=30 not gap=3 | Changed to `beta*(gap-margin)` | `347072f` |
 | `/workspace` disk full | Both runs crashed at step 30 | Moved checkpoints to `/mnt/nvme3n1` | `953b8a0` |
 | Batch sharding in actor_hook | IndexError on global batch positions | Pre-compute in extensions.py | `5a7a94f` |
+| max_tokens=0 in multi-turn | Crash when trajectory fills context | Use max_model_len for budget, clamp to 1 | `790db83` |
+| Weak WebShop privileged facts | Guide rewrites meaningless (facts ≈ task) | Add ASIN, product attrs, options, price | `790db83` |
 
 ---
 
@@ -239,3 +296,16 @@ Initial implementation tried to index `data.batch["old_log_probs"]` with global 
 | formula | `beta*gap` | `beta*gap-m` | `beta*gap-m` | `beta*(gap-m)` | `beta*(gap-m)` + L_cp |
 | facts | BROKEN | BROKEN | fixed | fixed | fixed |
 | loss terms | L_cv | L_cv | L_cv | L_cv | L_cv + L_cp |
+
+### WebShop Experiments
+
+| Param | W1-W2 (beta=0.1) | W3-W4 (beta=1.0) | W5-W6 (next) |
+|-------|-------------------|-------------------|--------------|
+| beta | 0.1 | 1.0 | 1.0 |
+| margin | 3 | 3 | 2 (cv), 0 (cp) |
+| lambda | 0.1 | 0.1 | 0.1 |
+| formula | `beta*gap-m` | `beta*(gap-m)` | `beta*(gap-m)` + L_cp |
+| facts | basic | basic | enriched (ASIN, attrs, options, price) |
+| loss terms | L_cv | L_cv | L_cv + L_cp |
+| eval (sr=0.5) | Score=23.09 | pending | pending |
+| baseline | Score=21.35 (Qwen3-4B), Score=36.27 (Dr. GRPO step 200) | | |
