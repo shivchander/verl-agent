@@ -113,7 +113,7 @@ def build_prompt(obs, admissible, task, history, step_count, history_length=2):
 
     recent = history[-history_length:]
     start_idx = max(0, len(history) - history_length)
-    lines = [f"[Observation {start_idx+j+1}: '{h_obs[:80]}', Action {start_idx+j+1}: '{h_act}']"
+    lines = [f"[Observation {start_idx+j+1}: '{h_obs}', Action {start_idx+j+1}: '{h_act}']"
              for j, (h_obs, h_act) in enumerate(recent)]
     return ALFWORLD_TEMPLATE.format(
         task_description=task, step_count=step_count,
@@ -175,7 +175,7 @@ def run_episode(client, model_name, game_env, game_idx, max_steps=50,
             trajectory.append({
                 "step": step + 1, "type": "api_error", "error": str(e),
             })
-            break
+            raw_action = ""
 
         messages.append({"role": "assistant", "content": raw_action})
         action = extract_action(raw_action)
