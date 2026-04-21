@@ -50,6 +50,20 @@ def opear_accumulate_gradients(actor, data, metrics):
     v_attn = opear_data["violating_attention_mask"].to(device)
     v_mask = opear_data["violating_response_mask"].to(device)
 
+    # Extract per-token-mean policy logprob for each contrastive pair
+    batch_positions = data.meta_info.get("opear_batch_positions", [])
+    policy_mean_lp = None
+    if batch_positions and "old_log_probs" in data.batch:
+        old_lp = data.batch["old_log_probs"]  # (batch_size, response_len)
+        resp_mask = data.batch["response_mask"]  # (batch_size, response_len)
+        p_lps = []
+        for bp in batch_positions:
+            lp_row = old_lp[bp]
+            mask_row = resp_mask[bp]
+            length = mask_row.sum().clamp(min=1.0)
+            p_lps.append((lp_row * mask_row).sum() / length)
+        policy_mean_lp = torch.stack(p_lps).to(device)
+
     num_pairs = c_ids.shape[0]
     resp_len = c_mask.shape[-1]
 
@@ -104,8 +118,10 @@ def opear_accumulate_gradients(actor, data, metrics):
         ci_rm = ci_mask[:, : c_lp.shape[-1]]
         vi_rm = vi_mask[:, : v_lp.shape[-1]]
 
+        pair_policy_lp = policy_mean_lp[i:i+1] if policy_mean_lp is not None else None
         pair_loss, pair_metrics = compute_opear_loss(
-            c_lp, ci_rm, v_lp, vi_rm, beta=beta, margin=margin
+            c_lp, ci_rm, v_lp, vi_rm, beta=beta, margin=margin,
+            policy_mean_lp=pair_policy_lp,
         )
 
         # No loss_sf: per-token-mean already normalizes by sequence length,
@@ -150,6 +166,15 @@ def opear_accumulate_gradients(actor, data, metrics):
         opear_metrics["opear/gap_std"] = gap_t.std().item() if num_pairs > 1 else 0.0
 
     opear_metrics["opear/loss"] = total_loss / num_pairs
+    # Propagate L_cp metrics from aggregated pair metrics
+    if "opear/cp_loss" in agg_metrics:
+        opear_metrics["opear/cp_loss"] = agg_metrics["opear/cp_loss"] / num_pairs
+    if "opear/policy_logprob" in agg_metrics:
+        opear_metrics["opear/policy_logprob"] = agg_metrics["opear/policy_logprob"] / num_pairs
+    if "opear/cp_gap" in agg_metrics:
+        opear_metrics["opear/cp_gap"] = agg_metrics["opear/cp_gap"] / num_pairs
+    if "opear/cv_loss" in agg_metrics:
+        opear_metrics["opear/cv_loss"] = agg_metrics["opear/cv_loss"] / num_pairs
     opear_metrics["opear/scaled_loss"] = total_scaled_loss
     opear_metrics["opear/grad_norm"] = opear_grad_norm
     opear_metrics["opear/grpo_grad_norm"] = grpo_grad_norm
