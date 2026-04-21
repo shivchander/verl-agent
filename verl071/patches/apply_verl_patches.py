@@ -137,6 +137,34 @@ def main():
     )
     success = success and ok
 
+    vllm_server_path = os.path.join(
+        verl_path, "workers", "rollout", "vllm_rollout", "vllm_async_server.py"
+    )
+
+    print("Patch 5: Fix max_tokens=0 crash in multi-turn rollouts")
+    ok = patch_file(
+        vllm_server_path,
+        '            # Default to a calculation that considers configured lengths\n'
+        '            # Cap max_tokens by response_length to ensure tensor alignment,\n'
+        '            # and by remaining budget to prevent OOM in multi-turn rollouts.\n'
+        '            max_tokens = min(\n'
+        '                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)\n'
+        '            )\n'
+        '\n'
+        '        # Clamp max_tokens to the valid range [0, max_possible_tokens]\n'
+        '        max_tokens = max(0, min(max_tokens, max_possible_tokens))',
+        '            # Default: cap by response_length and remaining context space.\n'
+        '            # In multi-turn, prompt_ids grows beyond prompt_length (user/env\n'
+        '            # messages accumulate), so use max_model_len as the true budget.\n'
+        '            max_tokens = min(self.config.response_length, max_possible_tokens)\n'
+        '\n'
+        '        # Clamp max_tokens to the valid range [1, max_possible_tokens].\n'
+        '        # Must be >= 1 to avoid vLLM VLLMValidationError.\n'
+        '        max_tokens = max(1, min(max_tokens, max_possible_tokens))',
+        "vllm_async_server.py: fix max_tokens=0 crash in multi-turn",
+    )
+    success = success and ok
+
     print()
     if success:
         print("All patches applied successfully.")

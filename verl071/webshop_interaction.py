@@ -117,11 +117,14 @@ def format_obs(obs: str, task: str) -> str:
         return obs
 
 
-def format_goal_facts(goal: dict) -> str:
+def format_goal_facts(goal: dict, product: dict | None = None) -> str:
     """Format WebShop goal dict as privileged facts string.
 
     Args:
-        goal: WebShop goal dict with keys: name, attributes, goal_options, price_upper, query
+        goal: WebShop goal dict with keys: name, attributes, goal_options,
+            price_upper, query, asin
+        product: Optional product dict from product_item_dict[asin] with keys:
+            Attributes, options, Price, etc.
 
     Returns:
         Formatted string starting with "Target product:" prefix.
@@ -132,11 +135,29 @@ def format_goal_facts(goal: dict) -> str:
     name = goal.get("name", "Unknown")
     lines.append(f"Target product: {name}")
 
+    # Target ASIN (visible in search result observations)
+    asin = goal.get("asin", "")
+    if asin:
+        lines.append(f"ASIN: {asin}")
+
     # Required attributes (list of strings)
     attributes = goal.get("attributes", [])
     if attributes:
         attr_str = ", ".join(str(a) for a in attributes)
         lines.append(f"Required attributes: {attr_str}")
+
+    # All product attributes (from product catalog)
+    if product:
+        prod_attrs = product.get("Attributes", [])
+        if prod_attrs:
+            lines.append(f"All product attributes: {', '.join(str(a) for a in prod_attrs)}")
+
+    # Available options with all values (from product catalog)
+    if product:
+        prod_options = product.get("options", {})
+        for opt_key, opt_values in prod_options.items():
+            values_str = ", ".join(str(v) for v in opt_values)
+            lines.append(f"Available {opt_key}s: {values_str}")
 
     # Required options (dict or list)
     goal_options = goal.get("goal_options", {})
@@ -144,9 +165,14 @@ def format_goal_facts(goal: dict) -> str:
         if isinstance(goal_options, dict):
             options_str = ", ".join(f"{k}={v}" for k, v in goal_options.items())
         else:
-            # Handle list case (fallback)
             options_str = ", ".join(str(opt) for opt in goal_options)
         lines.append(f"Required options: {options_str}")
+
+    # Product price range (from product catalog)
+    if product:
+        price = product.get("Price", "")
+        if price:
+            lines.append(f"Price: {price}")
 
     # Price limit (omit if >= 1000000, which means no constraint)
     price_upper = goal.get("price_upper", 1000000)
@@ -308,11 +334,12 @@ class WebShopInteraction(BaseInteraction):
             task = extract_task(obs)
             obs_formatted = format_obs(obs, task)
 
-            # Extract privileged facts from the goal
+            # Extract privileged facts from the goal + product catalog
             facts_str = ""
             try:
                 goal = env.server.goals[goal_idx]
-                facts_str = format_goal_facts(goal)
+                product = env.server.product_item_dict.get(goal.get("asin", ""))
+                facts_str = format_goal_facts(goal, product=product)
             except Exception as e:
                 logger.warning(f"Failed to extract WebShop goal facts: {e}")
 
