@@ -37,7 +37,7 @@ max_user_turns: 50
 
 # Trainer
 epochs: 250
-save_freq: 30
+save_freq: 10
 test_freq: 5
 val_before_train: true
 logger: '["console","wandb"]'

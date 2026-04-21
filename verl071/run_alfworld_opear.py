@@ -55,6 +55,7 @@ DEFAULTS = {
     # Infra
     "gpus": "4,5,6,7",
     "n_gpus_per_node": 4,
+    "checkpoint_dir": "/mnt/nvme3n1/opear_checkpoints",
 }
 
 
@@ -144,6 +145,7 @@ def build_cmd(cfg: dict) -> list[str]:
         f"trainer.logger={cfg['logger']}",
         f"trainer.project_name={cfg['project_name']}",
         f"trainer.experiment_name={cfg['experiment_name']}",
+        f"trainer.default_local_dir={cfg['checkpoint_dir']}/{cfg['experiment_name']}",
     ]
     return cmd
 
