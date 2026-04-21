@@ -50,19 +50,10 @@ def opear_accumulate_gradients(actor, data, metrics):
     v_attn = opear_data["violating_attention_mask"].to(device)
     v_mask = opear_data["violating_response_mask"].to(device)
 
-    # Extract per-token-mean policy logprob for each contrastive pair
-    batch_positions = data.meta_info.get("opear_batch_positions", [])
-    policy_mean_lp = None
-    if batch_positions and "old_log_probs" in data.batch:
-        old_lp = data.batch["old_log_probs"]  # (batch_size, response_len)
-        resp_mask = data.batch["response_mask"]  # (batch_size, response_len)
-        p_lps = []
-        for bp in batch_positions:
-            lp_row = old_lp[bp]
-            mask_row = resp_mask[bp]
-            length = mask_row.sum().clamp(min=1.0)
-            p_lps.append((lp_row * mask_row).sum() / length)
-        policy_mean_lp = torch.stack(p_lps).to(device)
+    # Pre-computed in extensions.py on the full batch (actor only sees a shard)
+    policy_mean_lp = data.meta_info.get("opear_policy_mean_lps")
+    if policy_mean_lp is not None:
+        policy_mean_lp = policy_mean_lp.to(device)
 
     num_pairs = c_ids.shape[0]
     resp_len = c_mask.shape[-1]

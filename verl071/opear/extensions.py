@@ -103,7 +103,21 @@ def _generate_contrastive_data(trainer, batch):
         max_response_length=batch.batch["responses"].shape[-1],
     )
     if opear_data is not None:
-        batch.meta_info["opear_batch_positions"] = opear_data.pop("batch_positions", [])
+        bp_list = opear_data.pop("batch_positions", [])
+        # Pre-compute per-token-mean policy logprobs for each contrastive pair
+        # (must be done here on the full batch — actor_hook only sees a sharded subset)
+        policy_mean_lps = None
+        if bp_list and "old_log_probs" in batch.batch:
+            old_lp = batch.batch["old_log_probs"]
+            resp_mask = batch.batch["response_mask"]
+            p_lps = []
+            for bp in bp_list:
+                lp_row = old_lp[bp]
+                mask_row = resp_mask[bp]
+                length = mask_row.sum().clamp(min=1.0)
+                p_lps.append((lp_row * mask_row).sum() / length)
+            policy_mean_lps = torch.stack(p_lps)
+        batch.meta_info["opear_policy_mean_lps"] = policy_mean_lps
         batch.meta_info["opear_data"] = opear_data
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
         batch.meta_info["opear_beta"] = trainer.opear_beta
