@@ -335,6 +335,7 @@ def tokenize_contrastive_responses(
 
     compliant_entries: list[dict] = []
     violating_entries: list[dict] = []
+    batch_positions: list[int] = []
 
     for traj, pair in zip(trajectories, contrastive_pairs):
         if pair is None:
@@ -364,6 +365,7 @@ def tokenize_contrastive_responses(
         if c_entry is not None and v_entry is not None:
             compliant_entries.append(c_entry)
             violating_entries.append(v_entry)
+            batch_positions.append(batch_pos)
 
     if not compliant_entries:
         return None
@@ -387,4 +389,5 @@ def tokenize_contrastive_responses(
         "violating_input_ids": pad_and_stack(violating_entries, "input_ids"),
         "violating_attention_mask": pad_and_stack(violating_entries, "attention_mask"),
         "violating_response_mask": pad_and_stack(violating_entries, "response_mask"),
+        "batch_positions": batch_positions,
     }
