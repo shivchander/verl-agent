@@ -185,52 +185,61 @@ Your admissible actions are: [{actions}].
 
 ## Evaluation
 
-Per-task evaluation on ALFWorld valid_seen (140 games) and valid_unseen (134 games):
+Per-task evaluation on ALFWorld valid_seen (140 games) and valid_unseen (134 games).
+
+Three eval profiles control per-turn token budget and total context:
+
+| Profile | Per-turn tokens | Total context | Use case |
+|---|---|---|---|
+| `short` | 512 | 16k | Fast eval, constrained generation |
+| `medium` | 2048 | 16k | Default, balanced |
+| `long` | 2048 | 40k | Matches training, best for comparison |
+
+### Running Evals
+
+**Recommended approach** — pre-start vLLM server for best performance:
 
 ```bash
-# Convert FSDP checkpoint to HF format
+# 1. Convert FSDP checkpoint to HF format
 python -m verl.model_merger merge \
     --backend fsdp \
-    --local_dir checkpoints/.../global_step_230/actor \
+    --local_dir checkpoints/.../global_step_150/actor \
     --target_dir /path/to/hf_model
 
-# Quick eval (unseen, 1 seed) — auto-launches vLLM server
+# 2. Start vLLM server
+CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
+    --model /path/to/hf_model \
+    --port 8100 --dtype bfloat16 \
+    --max-model-len 16384 \   # 40960 for long profile
+    --gpu-memory-utilization 0.9 &
+
+# 3. Run eval with --no-server
 python verl071/eval_alfworld.py \
     --checkpoint /path/to/hf_model \
     --split unseen --seed 123 \
-    --gpu 0 \
+    --no-server --api-base http://localhost:8100/v1 \
+    --max-concurrent 8 \
+    --profile medium \
     --output eval_results.json
-
-# Full eval (both splits, 3 seeds)
-python verl071/eval_alfworld.py \
-    --checkpoint /path/to/hf_model \
-    --full --gpu 0 \
-    --output eval_full.json
-
-# With existing vLLM server
-python verl071/eval_alfworld.py \
-    --checkpoint /path/to/hf_model \
-    --full --no-server --api-base http://localhost:8100/v1
 ```
 
 Key flags:
-- `--max-concurrent 8`: parallel games via multiprocessing (default: 16)
+- `--profile short|medium|long`: eval profile (default: medium)
+- `--max-concurrent 8`: parallel games via multiprocessing
+- `--no-server --api-base URL`: use pre-started vLLM (recommended)
+- `--full`: both splits × 3 seeds
 - `--temperature 0.4`: matches training val settings
-- `--max-steps 50`: max turns per episode
 
-The eval maintains full multi-turn conversation history matching training rollouts.
+All evals save full trajectories (raw model output, parsed action, observation per turn)
+alongside per-task success rates and turn counts.
 
-### Step 230 Results (eval_out_of_distribution, seed 123)
+### Results: Dr. GRPO vs Lambda01 at Step 150 (eval_out_of_distribution, seed 123)
 
-| Task Type | Won | Total | Rate |
-|---|---|---|---|
-| pick_and_place_simple | 23 | 24 | 95.8% |
-| look_at_obj_in_light | 9 | 18 | 50.0% |
-| pick_clean_then_place_in_recep | 20 | 31 | 64.5% |
-| pick_heat_then_place_in_recep | 16 | 23 | 69.6% |
-| pick_cool_then_place_in_recep | 11 | 21 | 52.4% |
-| pick_two_obj_and_place | 13 | 17 | 76.5% |
-| **OVERALL** | **92** | **134** | **68.7%** |
+| Profile | Dr. GRPO step 150 | Lambda01 step 150 |
+|---|---|---|
+| **Short** (512/turn, 16k ctx) | 41.8% (33.6 avg steps) | 70.9% (23.4 avg steps) |
+| **Medium** (2k/turn, 16k ctx) | 70.1% (22.8 avg steps) | 70.9% (21.6 avg steps) |
+| **Long** (2k/turn, 40k ctx) | 71.6% (22.3 avg steps) | **80.6%** (21.4 avg steps) |
 
 ## Differences from Original verl-agent (0.3.1)
 
