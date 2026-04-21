@@ -103,6 +103,7 @@ def _generate_contrastive_data(trainer, batch):
         max_response_length=batch.batch["responses"].shape[-1],
     )
     if opear_data is not None:
+        batch.meta_info["opear_batch_positions"] = opear_data.pop("batch_positions", [])
         batch.meta_info["opear_data"] = opear_data
         batch.meta_info["opear_lambda"] = trainer.opear_lambda
         batch.meta_info["opear_beta"] = trainer.opear_beta
