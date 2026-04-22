@@ -233,13 +233,35 @@ Key flags:
 All evals save full trajectories (raw model output, parsed action, observation per turn)
 alongside per-task success rates and turn counts.
 
-### Results: Dr. GRPO vs Lambda01 at Step 150 (eval_out_of_distribution, seed 123)
+### Results (eval_out_of_distribution, seed 123)
 
-| Profile | Dr. GRPO step 150 | Lambda01 step 150 |
-|---|---|---|
-| **Short** (512/turn, 16k ctx) | 41.8% (33.6 avg steps) | 70.9% (23.4 avg steps) |
-| **Medium** (2k/turn, 16k ctx) | 70.1% (22.8 avg steps) | 70.9% (21.6 avg steps) |
-| **Long** (2k/turn, 40k ctx) | 71.6% (22.3 avg steps) | **80.6%** (21.4 avg steps) |
+**Step 150 — all models at the same training step:**
+
+| Profile | Dr. GRPO | GRPO+KL | Lambda01 | sr050 | sr100 |
+|---|---|---|---|---|---|
+| **Short** | 41.8% (33.6) | 48.5% (32.4) | 70.9% (23.4) | 41.8% (34.6) | 68.7% (25.1) |
+| **Medium** | 70.1% (22.8) | 60.4% (26.8) | 70.9% (21.6) | 62.7% (26.1) | 74.6% (22.3) |
+| **Long** | 71.6% (22.3) | 70.9% (24.4) | 80.6% (21.4) | 67.2% (25.2) | **82.8%** (21.3) |
+
+**Final checkpoint — best from each run:**
+
+| Profile | Dr. GRPO 240 | GRPO+KL 250 | sr050 250 | sr100 250 |
+|---|---|---|---|---|
+| **Short** | 73.9% (21.3) | 48.5% (30.9) | 67.9% (23.9) | **85.8%** (18.0) |
+| **Medium** | **85.8%** (16.4) | 65.7% (24.4) | **85.8%** (16.6) | 82.1% (17.6) |
+| **Long** | 92.5% (14.6) | 65.7% (25.1) | 88.8% (16.6) | **93.3%** (15.9) |
+
+**Per-task breakdown, long profile — Dr. GRPO vs sr100:**
+
+| Task Type | DrGRPO 150 | sr100 150 | DrGRPO 240 | sr100 250 |
+|---|---|---|---|---|
+| pick_and_place_simple | 91.7% | **100%** | **100%** | 91.7% |
+| look_at_obj_in_light | 77.8% | **94.4%** | **100%** | **100%** |
+| pick_clean_then_place | 41.9% | 54.8% | 83.9% | **93.5%** |
+| pick_heat_then_place | 73.9% | 82.6% | 82.6% | **91.3%** |
+| pick_cool_then_place | 71.4% | 85.7% | **95.2%** | **95.2%** |
+| pick_two_obj_and_place | 88.2% | 94.1% | **100%** | 88.2% |
+| **OVERALL** | 71.6% | **82.8%** | 92.5% | **93.3%** |
 
 ## Differences from Original verl-agent (0.3.1)
 
