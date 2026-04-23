@@ -103,13 +103,21 @@ class AlfWorldInteraction(BaseInteraction):
                          "agent_system/environments/env_package/alfworld/configs/config_tw.yaml")
         )
 
+        # Data subset: path to JSON with {"indices": [int, ...]} for data-constrained experiments
+        self._game_subset_file = config.get("game_subset_file", None)
+        self._game_subset_indices: list[int] | None = None
+
         # Game file lists per split (lazy loaded)
         self._game_files: dict[str, list[str]] = {}
         self._alf_configs: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     def _load_game_files(self, split: str) -> list[str]:
-        """Load and cache game file list for a split."""
+        """Load and cache game file list for a split.
+
+        If game_subset_file is configured (for data-constrained experiments),
+        only the specified game indices are kept for the train split.
+        """
         alf_split = SPLIT_MAP.get(split, "train")
         if alf_split not in self._game_files:
             from alfworld.agents.environment import get_environment
@@ -119,9 +127,23 @@ class AlfWorldInteraction(BaseInteraction):
                 alf_config = yaml.safe_load(f)
 
             tw_env = get_environment("AlfredTWEnv")(alf_config, train_eval=alf_split)
-            self._game_files[alf_split] = list(tw_env.game_files)
+            all_games = list(tw_env.game_files)
             self._alf_configs[alf_split] = alf_config
-            logger.info(f"Loaded {len(tw_env.game_files)} games for split={alf_split}")
+
+            # Apply data subset filter for train split
+            if alf_split == "train" and self._game_subset_file:
+                import json
+                with open(self._game_subset_file) as f:
+                    subset_data = json.load(f)
+                subset_indices = subset_data["indices"]
+                self._game_subset_indices = subset_indices
+                filtered = [all_games[i] for i in subset_indices if i < len(all_games)]
+                print(f"[ALFWorld] Data subset: {len(filtered)}/{len(all_games)} games "
+                      f"({subset_data.get('percentage', '?')}%) from {self._game_subset_file}")
+                self._game_files[alf_split] = filtered
+            else:
+                self._game_files[alf_split] = all_games
+                logger.info(f"Loaded {len(all_games)} games for split={alf_split}")
         return self._game_files[alf_split]
 
     def _select_game_index(self, split: str, prompt_index: int, global_step: int = 0) -> int:
@@ -130,7 +152,7 @@ class AlfWorldInteraction(BaseInteraction):
         Pure function — all rollouts with the same (index, global_step)
         get the same game, regardless of which worker handles them.
         Different global_steps cycle through different games, so the model
-        sees all 3553 training games across epochs.
+        sees all available training games across epochs.
         """
         game_files = self._load_game_files(split)
         num_games = len(game_files)

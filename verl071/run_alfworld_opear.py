@@ -67,7 +67,29 @@ def load_config(config_path: str) -> dict:
 
 
 def build_cmd(cfg: dict) -> list[str]:
-    interaction_config = os.path.join(os.getcwd(), "alfworld_interaction_config.yaml")
+    # If game_subset_file is set, generate a per-experiment interaction config
+    game_subset = cfg.get("game_subset_file")
+    if game_subset:
+        game_subset = os.path.abspath(game_subset)
+        interaction_config = os.path.join(
+            os.getcwd(), f"alfworld_interaction_config_{cfg['experiment_name']}.yaml"
+        )
+        ic_data = {
+            "interaction": [{
+                "name": "alfworld",
+                "class_name": "alfworld_interaction.AlfWorldInteraction",
+                "config": {
+                    "max_steps": 50,
+                    "history_length": 2,
+                    "game_subset_file": game_subset,
+                },
+            }]
+        }
+        with open(interaction_config, "w") as f:
+            yaml.dump(ic_data, f, default_flow_style=False)
+        print(f"  Game subset: {game_subset}")
+    else:
+        interaction_config = os.path.join(os.getcwd(), "alfworld_interaction_config.yaml")
     reward_fn = os.path.join(os.getcwd(), "alfworld_reward.py")
     loss_scale = cfg["max_response_length"]
 

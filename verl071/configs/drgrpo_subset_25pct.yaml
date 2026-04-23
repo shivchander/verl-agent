@@ -1,0 +1,38 @@
+# Dr. GRPO baseline — 25% data subset (888 games)
+experiment_name: drgrpo_subset_25pct_qwen3_4b
+gpus: "0,1,2,3"
+
+# Data subset
+game_subset_file: verl071/data/subsets/train_subset_25pct_seed42.json
+
+# Model
+model: Qwen/Qwen3-4B
+tp: 2
+gpu_memory_utilization: 0.5
+max_model_len: 18432
+
+# Data
+group_size: 8
+train_batch_size: 16
+val_batch_size: 134
+max_prompt_length: 2048
+max_response_length: 15360
+seed: 42
+
+# Actor
+lr: 1.0e-6
+loss_agg_mode: seq-mean-token-sum-norm
+
+# Algorithm
+gamma: 0.95
+
+# Agent loop
+max_user_turns: 50
+
+# Trainer
+epochs: 250
+save_freq: 50
+test_freq: 5
+val_before_train: true
+logger: '["console","wandb"]'
+project_name: opear_alfworld_data_ablation
